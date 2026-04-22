@@ -150,14 +150,14 @@ def build_server(
 ) -> Server:
     """Return a configured low-level Server instance.
 
-    Handlers are registered via constructor kwargs (the only registration
-    mechanism available in SDK ≥ 1.6 for the low-level Server class).
+    Handlers are registered using the SDK's decorator API (mcp 1.27+):
+      @srv.list_tools()  →  func() -> list[Tool]
+      @srv.call_tool()   →  func(name, arguments) -> CallToolResult | list[ContentBlock]
     """
+    srv: Server = Server(server_name)
 
-    async def _on_list_tools(
-        ctx: Any,
-        params: Any,
-    ) -> types.ListToolsResult:
+    @srv.list_tools()
+    async def _list_tools() -> list[types.Tool]:
         tools: list[types.Tool] = list(AUDIT_TOOLS)
         if proxy is not None:
             try:
@@ -165,15 +165,10 @@ def build_server(
                 tools.extend(downstream)
             except Exception:
                 log.exception("proxy.list_tools_failed")
-        return types.ListToolsResult(tools=tools)
+        return tools
 
-    async def _on_call_tool(
-        ctx: Any,
-        params: types.CallToolRequestParams,
-    ) -> types.CallToolResult:
-        name = params.name
-        arguments = dict(params.arguments) if params.arguments else {}
-
+    @srv.call_tool()
+    async def _call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         if name in AUDIT_TOOL_NAMES:
             try:
                 content = _run_audit_tool(store, name, arguments)
@@ -200,11 +195,7 @@ def build_server(
 
         return await _proxied_call(proxy, store, name, arguments or None)
 
-    return Server(
-        server_name,
-        on_list_tools=_on_list_tools,
-        on_call_tool=_on_call_tool,
-    )
+    return srv
 
 
 # ----------------------------------------------------------- audit tool dispatch

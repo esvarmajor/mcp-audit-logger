@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: System :: Logging",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.6.0",  # requires decorator-based handler API on lowlevel.Server
     "anyio>=4.5",
     "pydantic>=2.7",
     "uvicorn>=0.30",

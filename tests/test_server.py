@@ -232,7 +232,7 @@ async def test_audit_purge_real(server: Server, store: AuditStore) -> None:
 
 @pytest.mark.asyncio
 async def test_invalid_arguments_returns_error(server: Server) -> None:
-    # limit must be ge=1, le=1000
+    # limit must be ge=1; the SDK's jsonschema validation fires first
     result = await _call(server, "audit_get_recent_calls", {"limit": -5})
     assert result.isError is True
-    assert "Invalid arguments" in result.content[0].text
+    assert "validation error" in result.content[0].text.lower()

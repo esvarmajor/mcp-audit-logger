@@ -52,12 +52,13 @@ class DownstreamProxy:
         self._stack = AsyncExitStack()
         try:
             if isinstance(self._config, DownstreamHttp):
-                # streamable_http_client yields a 2-tuple (read, write)
+                # streamable_http_client yields a 3-tuple (read, write, get_session_id)
                 ctx = streamable_http_client(
                     self._config.url,
                     headers=self._config.headers or None,
                 )
-                read, write = await self._stack.enter_async_context(ctx)
+                transport = await self._stack.enter_async_context(ctx)
+                read, write = transport[0], transport[1]
             else:
                 params = StdioServerParameters(
                     command=self._config.command,

@@ -1,23 +1,28 @@
 """CLI entry point for `mcp-audit-logger`.
 
-Boots the proxy, builds the MCP server, wraps it in a Starlette ASGI app via
-`server.streamable_http_app()`, optionally adds bearer auth middleware, then
-hands off to uvicorn. Proxy start/stop is managed around the uvicorn lifecycle.
+Boots the Streamable HTTP transport, wires up the proxy and audit store,
+and hands everything to uvicorn. Kill with Ctrl-C.
 
-Kill with Ctrl-C.
+Transport flow:
+  client → Starlette (our app) → StreamableHTTPSessionManager → Server
+                                                                   └→ DownstreamProxy → real server
+                                                                   └→ AuditStore (SQLite)
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
-from typing import Any
+from typing import AsyncIterator
 
 import uvicorn
-from starlette.requests import Request
-from starlette.responses import Response
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from starlette.applications import Starlette
+from starlette.routing import Mount
+from starlette.types import Receive, Scope, Send
 
 from .config import Config, load_config
 from .logging_config import configure_logging
@@ -28,27 +33,7 @@ from .storage import AuditStore
 log = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------- bearer auth
-
-
-class BearerAuthMiddleware:
-    """Thin ASGI middleware that enforces a static bearer token on every request."""
-
-    def __init__(self, app: Any, token: str) -> None:
-        self._app = app
-        self._expected = f"Bearer {token}"
-
-    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if scope["type"] in ("http", "websocket"):
-            headers = {k.lower(): v.decode() for k, v in scope.get("headers", [])}
-            if headers.get("authorization") != self._expected:
-                response = Response("Unauthorized", status_code=401, media_type="text/plain")
-                await response(scope, receive, send)
-                return
-        await self._app(scope, receive, send)
-
-
-# --------------------------------------------------------------- CLI
+# ---------------------------------------------------------------------- CLI
 
 
 def _parse_args() -> argparse.Namespace:
@@ -82,18 +67,13 @@ def _apply_cli_overrides(cfg: Config, args: argparse.Namespace) -> Config:
     return cfg
 
 
-# --------------------------------------------------------------- main loop
+# ---------------------------------------------------------------------- server
 
 
 async def _run(cfg: Config) -> None:
     store = AuditStore(cfg.db_path, max_payload_bytes=cfg.max_payload_bytes)
 
-    proxy: DownstreamProxy | None = None
-    if cfg.downstream is not None:
-        proxy = DownstreamProxy(cfg.downstream)
-        await proxy.start()
-        log.info("downstream.ready", extra={"target": proxy.target_label})
-    else:
+    if cfg.downstream is None:
         log.warning(
             "downstream.not_configured",
             extra={
@@ -104,37 +84,73 @@ async def _run(cfg: Config) -> None:
             },
         )
 
-    try:
-        srv = build_server(proxy=proxy, store=store)
+    proxy: DownstreamProxy | None = (
+        DownstreamProxy(cfg.downstream) if cfg.downstream is not None else None
+    )
+    srv = build_server(proxy=proxy, store=store)
 
-        # streamable_http_app creates a Starlette app whose lifespan manages the
-        # StreamableHTTPSessionManager (starts/stops the anyio task group).
-        # The `host` parameter enables DNS-rebinding protection on localhost.
-        app = srv.streamable_http_app(
-            streamable_http_path=cfg.mount_path,
-            host=cfg.host,
-        )
+    session_mgr = StreamableHTTPSessionManager(
+        app=srv,
+        event_store=None,
+        json_response=False,
+        stateless=False,
+    )
 
-        if cfg.http_token:
-            app.add_middleware(BearerAuthMiddleware, token=cfg.http_token)
-            log.info("auth.bearer_token_enabled")
+    expected_token: str | None = (
+        f"Bearer {cfg.http_token}" if cfg.http_token else None
+    )
+    if expected_token:
+        log.info("auth.bearer_token_enabled")
 
-        log.info("server.starting", extra={"host": cfg.host, "port": cfg.port, "path": cfg.mount_path})
+    async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
+        # Optional bearer auth check — inline to avoid Starlette middleware complexity.
+        if expected_token is not None:
+            headers = {k.lower(): v.decode() for k, v in scope.get("headers", [])}
+            if headers.get("authorization") != expected_token:
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
+                })
+                await send({"type": "http.response.body", "body": b"Unauthorized", "more_body": False})
+                return
+        await session_mgr.handle_request(scope, receive, send)
 
-        uvicorn_cfg = uvicorn.Config(
-            app,
-            host=cfg.host,
-            port=cfg.port,
-            log_config=None,
-            access_log=False,
-        )
-        server = uvicorn.Server(uvicorn_cfg)
-        await server.serve()
+    @contextlib.asynccontextmanager
+    async def lifespan(_: Starlette) -> AsyncIterator[None]:
+        # Start the proxy and session manager in the same anyio task group so that
+        # stop() later exits the stdio_client cancel scope from the same task that
+        # entered it. Starting proxy outside session_mgr.run() and stopping it inside
+        # causes a "cancel scope in different task" RuntimeError in anyio.
+        async with session_mgr.run():
+            if proxy is not None:
+                await proxy.start()
+                log.info("downstream.ready", extra={"target": proxy.target_label})
+            log.info(
+                "server.started",
+                extra={"host": cfg.host, "port": cfg.port, "path": cfg.mount_path},
+            )
+            try:
+                yield
+            finally:
+                if proxy is not None:
+                    await proxy.stop()
+                log.info("server.stopped")
 
-    finally:
-        if proxy is not None:
-            await proxy.stop()
-            log.info("downstream.stopped")
+    app = Starlette(
+        routes=[Mount(cfg.mount_path, app=handle_mcp)],
+        lifespan=lifespan,
+    )
+
+    uvicorn_cfg = uvicorn.Config(
+        app,
+        host=cfg.host,
+        port=cfg.port,
+        log_config=None,
+        access_log=False,
+    )
+    server = uvicorn.Server(uvicorn_cfg)
+    await server.serve()
 
 
 def main() -> None:
