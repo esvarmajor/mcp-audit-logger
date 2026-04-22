@@ -1,0 +1,242 @@
+# mcp-audit-logger
+
+A transparent middleware proxy for the [Model Context Protocol](https://modelcontextprotocol.io/).
+It sits between any MCP client and any MCP server, forwards every tool call untouched,
+and records a full audit trail to a local SQLite database — arguments, response,
+timestamp, duration, and success/failure. It also exposes its own MCP tools so
+your agent can query the audit history at runtime.
+
+```
+┌──────────────┐   Streamable HTTP   ┌────────────────────┐   stdio or HTTP   ┌────────────────┐
+│  MCP Client  │ ──────────────────▶ │  mcp-audit-logger  │ ────────────────▶ │  MCP Server X  │
+│  (agent/IDE) │ ◀────────────────── │     (this proxy)   │ ◀──────────────── │  (real tools)  │
+└──────────────┘                     └─────────┬──────────┘                   └────────────────┘
+                                               │
+                                               ▼
+                                        ┌─────────────┐
+                                        │  audit.db   │   ← SQLite, queryable via audit_* tools
+                                        └─────────────┘
+```
+
+## Why
+
+The MCP ecosystem is moving fast, and agents are starting to call real tools
+against real systems. If something goes wrong — a bad write, a runaway loop,
+a misrouted call — you want a reliable, append-only record of what happened,
+independent of any individual server's logging. This project is that record.
+
+## Features
+
+- **Transparent proxy.** Any tool your downstream server exposes shows up to
+  the client with its original name, schema, and behavior. Clients don't need
+  to know the logger is there.
+- **Full audit trail in SQLite.** One row per tool call. No external DB, no
+  Kafka, nothing to operate.
+- **Four query tools for agents.** An agent connected through the logger can
+  introspect its own call history:
+    - `audit_get_recent_calls`
+    - `audit_get_calls_by_tool`
+    - `audit_get_failed_calls`
+    - `audit_get_call_stats`
+- **Streamable HTTP transport.** No SSE — deprecated as of the 2025-03-26 MCP
+  spec revision.
+- **Structured JSON logs on stderr.** One JSON object per line, ready for any
+  ingestion pipeline (Vector, Loki, Datadog, etc.).
+- **Bounded payload storage.** Large request/response payloads are truncated
+  with a head snippet preserved, so the DB stays predictable.
+
+## Requirements
+
+- Python **3.10 or newer** (the MCP SDK does not support 3.9).
+- SQLite is provided by the Python stdlib. No external dependencies.
+
+## Install
+
+From source (until this is published on PyPI):
+
+```bash
+git clone https://github.com/esvarmajor/mcp-audit-logger.git
+cd mcp-audit-logger
+python3.10 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+## Quick start
+
+### 1. Point the proxy at an existing MCP server
+
+The simplest way is environment variables. Suppose you're already running an
+MCP server via stdio — e.g. the canonical `mcp-server-fetch`:
+
+```bash
+export AUDIT_DOWNSTREAM_COMMAND="python"
+export AUDIT_DOWNSTREAM_ARGS='["-m", "mcp_server_fetch"]'
+export AUDIT_DB_PATH="./audit.db"
+
+mcp-audit-logger --host 127.0.0.1 --port 8765
+```
+
+The proxy is now listening on `http://127.0.0.1:8765/mcp`. Any MCP client that
+connects to it will see every tool the fetch server exposes, plus the four
+`audit_*` query tools — and every call will be logged to `./audit.db`.
+
+### 2. Or use a JSON config file
+
+```bash
+mcp-audit-logger --config ./examples/config.json
+```
+
+Example config (`examples/config.json`):
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "db_path": "./audit.db",
+  "log_level": "INFO",
+  "downstream": {
+    "kind": "stdio",
+    "command": "python",
+    "args": ["-m", "mcp_server_fetch"]
+  }
+}
+```
+
+Or to proxy a server that speaks Streamable HTTP:
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "db_path": "./audit.db",
+  "downstream": {
+    "kind": "http",
+    "url": "http://localhost:9000/mcp",
+    "headers": { "Authorization": "Bearer ..." }
+  }
+}
+```
+
+### 3. Wire it into a client
+
+Any MCP client that supports Streamable HTTP can connect. For Claude Desktop,
+replace the direct server entry with one that points at the logger:
+
+```jsonc
+// ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "fetch-audited": {
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}
+```
+
+See `examples/claude_desktop_config.json` for a full example.
+
+## Configuration reference
+
+Every option can be set via JSON config file, environment variable, or CLI flag.
+CLI beats env beats file.
+
+| Key                  | Env var                     | CLI flag         | Default       |
+| -------------------- | --------------------------- | ---------------- | ------------- |
+| `host`               | `AUDIT_HOST`                | `--host`         | `127.0.0.1`   |
+| `port`               | `AUDIT_PORT`                | `--port`         | `8765`        |
+| `mount_path`         | `AUDIT_MOUNT_PATH`          | `--mount-path`   | `/mcp`        |
+| `db_path`            | `AUDIT_DB_PATH`             | `--db-path`      | `./audit.db`  |
+| `log_level`          | `AUDIT_LOG_LEVEL`           | `--log-level`    | `INFO`        |
+| `max_payload_bytes`  | `AUDIT_MAX_PAYLOAD_BYTES`   | —                | `65536`       |
+| `downstream.kind`    | (see below)                 | —                | —             |
+
+Downstream via env vars:
+
+| Env var                        | Meaning                                                        |
+| ------------------------------ | -------------------------------------------------------------- |
+| `AUDIT_DOWNSTREAM_URL`         | If set, use Streamable HTTP transport at this URL.             |
+| `AUDIT_DOWNSTREAM_HEADERS`     | JSON dict of headers for HTTP downstream.                      |
+| `AUDIT_DOWNSTREAM_COMMAND`     | Otherwise, use stdio transport spawning this command.          |
+| `AUDIT_DOWNSTREAM_ARGS`        | Shell-split string or JSON array of args.                      |
+| `AUDIT_DOWNSTREAM_ENV`         | JSON dict of env vars to pass to the stdio child.              |
+
+If no downstream is configured, the logger still runs — it just exposes the
+`audit_*` query tools against whatever is already in `audit.db`. Useful for
+offline analysis.
+
+## The audit_* tools
+
+| Tool                        | Input                                       | Output                                   |
+| --------------------------- | ------------------------------------------- | ---------------------------------------- |
+| `audit_get_recent_calls`    | `{ "limit": 50 }`                           | Newest-first array of call records.      |
+| `audit_get_calls_by_tool`   | `{ "tool_name": "...", "limit": 50 }`       | Newest-first array filtered by name.     |
+| `audit_get_failed_calls`    | `{ "limit": 50 }`                           | Newest-first array of `success = false`. |
+| `audit_get_call_stats`      | `{}`                                        | Per-tool aggregates (see below).         |
+
+A call record looks like:
+
+```json
+{
+  "id": 42,
+  "ts_start": 1713660012.123,
+  "ts_end": 1713660012.456,
+  "duration_ms": 333.0,
+  "tool_name": "fetch",
+  "arguments": { "url": "https://example.com" },
+  "response": { "content": [{ "type": "text", "text": "..." }], "isError": false },
+  "success": true,
+  "error": null,
+  "client_info": null,
+  "downstream_target": "stdio:python -m mcp_server_fetch"
+}
+```
+
+`audit_get_call_stats` returns:
+
+```json
+[
+  {
+    "tool_name": "fetch",
+    "call_count": 142,
+    "avg_duration_ms": 284.1,
+    "min_duration_ms": 41.0,
+    "max_duration_ms": 3120.0,
+    "error_count": 3,
+    "error_rate": 0.0211
+  }
+]
+```
+
+## SQLite schema
+
+```sql
+CREATE TABLE audit_calls (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_start           REAL    NOT NULL,
+    ts_end             REAL    NOT NULL,
+    duration_ms        REAL    NOT NULL,
+    tool_name          TEXT    NOT NULL,
+    arguments_json     TEXT,
+    response_json      TEXT,
+    success            INTEGER NOT NULL,
+    error              TEXT,
+    client_info        TEXT,
+    downstream_target  TEXT
+);
+```
+
+The DB runs in WAL mode, so you can `sqlite3 audit.db` and run arbitrary
+queries while the logger is live.
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+pytest
+ruff check .
+```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

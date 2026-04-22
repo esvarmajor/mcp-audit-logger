@@ -1,0 +1,14 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "mount_path": "/mcp",
+  "db_path": "./audit.db",
+  "log_level": "INFO",
+  "max_payload_bytes": 65536,
+  "downstream": {
+    "kind": "stdio",
+    "command": "python",
+    "args": ["-m", "mcp_server_fetch"],
+    "env": {}
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "db_path": "./audit.db",
+  "downstream": {
+    "kind": "http",
+    "url": "http://localhost:9000/mcp",
+    "headers": {
+      "Authorization": "Bearer REPLACE_ME"
+    }
+  }
+}

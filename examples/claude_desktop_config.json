@@ -1,0 +1,12 @@
+{
+  "_comment": [
+    "Example Claude Desktop config that routes an MCP server through mcp-audit-logger.",
+    "Start mcp-audit-logger separately (e.g. `mcp-audit-logger --config ./examples/config.json`)",
+    "and then point Claude Desktop at its HTTP endpoint instead of directly at the underlying server."
+  ],
+  "mcpServers": {
+    "fetch-audited": {
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}
