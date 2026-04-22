@@ -14,7 +14,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, overload
 
 
 @dataclass
@@ -37,7 +37,7 @@ class DownstreamHttp:
     kind: str = "http"
 
 
-Downstream = Union[DownstreamStdio, DownstreamHttp]
+Downstream = DownstreamStdio | DownstreamHttp
 
 
 @dataclass
@@ -71,6 +71,10 @@ class Config:
     http_token: str | None = None
 
 
+@overload
+def _env(name: str, default: str) -> str: ...
+@overload
+def _env(name: str, default: None = ...) -> str | None: ...
 def _env(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
     return val if val not in (None, "") else default
@@ -88,12 +92,15 @@ def load_config(config_path: str | Path | None = None) -> Config:
 
     cfg = Config()
     cfg.host = str(cfg_data.get("host", _env("AUDIT_HOST", cfg.host)))
-    cfg.port = int(cfg_data.get("port", _env("AUDIT_PORT", cfg.port)))
+    cfg.port = int(cfg_data.get("port", _env("AUDIT_PORT", str(cfg.port))))
     cfg.mount_path = str(cfg_data.get("mount_path", _env("AUDIT_MOUNT_PATH", cfg.mount_path)))
     cfg.db_path = Path(str(cfg_data.get("db_path", _env("AUDIT_DB_PATH", str(cfg.db_path)))))
     cfg.log_level = str(cfg_data.get("log_level", _env("AUDIT_LOG_LEVEL", cfg.log_level)))
     cfg.max_payload_bytes = int(
-        cfg_data.get("max_payload_bytes", _env("AUDIT_MAX_PAYLOAD_BYTES", cfg.max_payload_bytes))
+        cfg_data.get(
+            "max_payload_bytes",
+            _env("AUDIT_MAX_PAYLOAD_BYTES", str(cfg.max_payload_bytes)),
+        )
     )
     cfg.http_token = cfg_data.get("http_token") or _env("AUDIT_HTTP_TOKEN") or None
 
@@ -115,10 +122,7 @@ def _load_downstream_from_env() -> dict[str, Any] | None:
     if cmd := _env("AUDIT_DOWNSTREAM_COMMAND"):
         args_env = _env("AUDIT_DOWNSTREAM_ARGS", "") or ""
         # Accept either a JSON array ("[\"--flag\", \"x\"]") or a plain shell-split string.
-        if args_env.startswith("["):
-            args = json.loads(args_env)
-        else:
-            args = args_env.split()
+        args = json.loads(args_env) if args_env.startswith("[") else args_env.split()
         env_env = _env("AUDIT_DOWNSTREAM_ENV")
         downstream_env = json.loads(env_env) if env_env else {}
         return {"kind": "stdio", "command": cmd, "args": args, "env": downstream_env}

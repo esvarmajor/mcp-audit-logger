@@ -13,15 +13,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 import mcp.types as types
+import pytest
 from mcp.server.lowlevel import Server
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from mcp_audit_logger.server import AUDIT_TOOL_NAMES, build_server
 from mcp_audit_logger.storage import AuditStore
-
 
 # ---------------------------------------------------------- helpers / fixtures
 
@@ -40,7 +38,6 @@ def server(store: AuditStore) -> Server:
 @pytest.fixture()
 def server_with_downstream(store: AuditStore, downstream_server: Server) -> Server:
     """Proxy server wired to a real in-process downstream."""
-    from mcp_audit_logger.proxy import DownstreamProxy
     # We expose a pre-built session via a monkey-patched proxy stub.
     return build_server(proxy=_StubProxy(downstream_server, store), store=store)
 
@@ -195,7 +192,7 @@ async def test_audit_export_jsonl(server: Server, store: AuditStore) -> None:
             arguments={}, response={}, success=True, error=None,
         )
     result = await _call(server, "audit_export_jsonl", {"limit": 2, "since_id": 0})
-    lines = [l for l in result.content[0].text.strip().split("\n") if l]
+    lines = [ln for ln in result.content[0].text.strip().split("\n") if ln]
     assert len(lines) == 2
     row = json.loads(lines[0])
     assert "tool_name" in row

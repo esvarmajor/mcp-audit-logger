@@ -15,8 +15,8 @@ import argparse
 import asyncio
 import contextlib
 import logging
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 import uvicorn
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -112,7 +112,11 @@ async def _run(cfg: Config) -> None:
                     "status": 401,
                     "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
                 })
-                await send({"type": "http.response.body", "body": b"Unauthorized", "more_body": False})
+                await send({
+                    "type": "http.response.body",
+                    "body": b"Unauthorized",
+                    "more_body": False,
+                })
                 return
         await session_mgr.handle_request(scope, receive, send)
 
@@ -158,10 +162,8 @@ def main() -> None:
     cfg = load_config(args.config)
     cfg = _apply_cli_overrides(cfg, args)
     configure_logging(cfg.log_level)
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(cfg))
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":

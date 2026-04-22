@@ -16,9 +16,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_calls (
@@ -144,7 +145,7 @@ class AuditStore:
                     downstream_target,
                 ),
             )
-            return int(cur.lastrowid)
+            return int(cur.lastrowid or 0)
 
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 1000))

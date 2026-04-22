@@ -203,7 +203,7 @@ def build_server(
 
 def _run_audit_tool(
     store: AuditStore, name: str, arguments: dict[str, Any]
-) -> list[types.TextContent]:
+) -> list[types.ContentBlock]:
     if name == "audit_get_recent_calls":
         a = _RecentArgs.model_validate(arguments)
         out: Any = store.recent(limit=a.limit)
@@ -270,7 +270,7 @@ async def _proxied_call(
             error = _extract_error_text(result)
         return types.CallToolResult(
             content=list(getattr(result, "content", []) or []),
-            isError=is_error or None,
+            isError=is_error,
         )
     except Exception as exc:
         success = False

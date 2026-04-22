@@ -20,6 +20,7 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
+import httpx
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
@@ -52,11 +53,16 @@ class DownstreamProxy:
         self._stack = AsyncExitStack()
         try:
             if isinstance(self._config, DownstreamHttp):
+                # streamable_http_client does NOT accept a `headers=` kwarg directly —
+                # custom headers must be attached to a user-provided httpx.AsyncClient
+                # (which the SDK keeps alive for the life of the session).
+                http_client: httpx.AsyncClient | None = None
+                if self._config.headers:
+                    http_client = await self._stack.enter_async_context(
+                        httpx.AsyncClient(headers=self._config.headers)
+                    )
+                ctx = streamable_http_client(self._config.url, http_client=http_client)
                 # streamable_http_client yields a 3-tuple (read, write, get_session_id)
-                ctx = streamable_http_client(
-                    self._config.url,
-                    headers=self._config.headers or None,
-                )
                 transport = await self._stack.enter_async_context(ctx)
                 read, write = transport[0], transport[1]
             else:
