@@ -192,3 +192,45 @@ class AuditStore:
                 """
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def in_range(self, *, start_ts: float, end_ts: float, limit: int = 200) -> list[dict[str, Any]]:
+        """Return calls whose ts_start falls in [start_ts, end_ts]."""
+        limit = max(1, min(limit, 5000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE ts_start >= ? AND ts_start <= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (start_ts, end_ts, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def search_arguments(self, *, pattern: str, limit: int = 50) -> list[dict[str, Any]]:
+        """SQL LIKE search over the serialised arguments JSON column."""
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE arguments_json LIKE ? ORDER BY id DESC LIMIT ?",
+                (pattern, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def export(self, *, limit: int = 500, since_id: int = 0) -> list[dict[str, Any]]:
+        """Return rows with id > since_id, oldest first, up to limit. For JSONL export."""
+        limit = max(1, min(limit, 10000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (since_id, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def purge(self, *, before_ts: float, dry_run: bool = True) -> int:
+        """Delete rows with ts_start < before_ts. Returns the number of rows affected."""
+        with self._lock, self._conn() as c:
+            cur = c.execute(
+                "SELECT COUNT(*) FROM audit_calls WHERE ts_start < ?", (before_ts,)
+            )
+            count = int(cur.fetchone()[0])
+            if not dry_run and count > 0:
+                c.execute("DELETE FROM audit_calls WHERE ts_start < ?", (before_ts,))
+        return count

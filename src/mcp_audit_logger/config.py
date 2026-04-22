@@ -66,6 +66,10 @@ class Config:
     # Larger payloads are truncated with a head snippet preserved.
     max_payload_bytes: int = 64 * 1024
 
+    # Optional bearer token. If set, every HTTP request to the proxy must carry
+    # `Authorization: Bearer <token>` or receive a 401 response.
+    http_token: str | None = None
+
 
 def _env(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
@@ -91,6 +95,7 @@ def load_config(config_path: str | Path | None = None) -> Config:
     cfg.max_payload_bytes = int(
         cfg_data.get("max_payload_bytes", _env("AUDIT_MAX_PAYLOAD_BYTES", cfg.max_payload_bytes))
     )
+    cfg.http_token = cfg_data.get("http_token") or _env("AUDIT_HTTP_TOKEN") or None
 
     downstream_data = cfg_data.get("downstream") or _load_downstream_from_env()
     if downstream_data:

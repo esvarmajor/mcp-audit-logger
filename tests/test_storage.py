@@ -122,3 +122,69 @@ def test_limit_clamps_are_applied(store: AuditStore) -> None:
     # Negative / zero / huge limits should still yield sane results.
     assert len(store.recent(limit=0)) == 1  # clamped up to min 1
     assert len(store.recent(limit=10_000)) == 5  # capped by available rows
+
+
+# ------------------------------------------------------------------ new methods
+
+
+def test_in_range_returns_only_matching_rows(store: AuditStore) -> None:
+    t = time.time()
+    _insert(store, tool="old")  # ts_start = now (current time, too recent for old range)
+    store.log_call(
+        ts_start=t - 200, ts_end=t - 199, tool_name="ancient",
+        arguments={}, response={}, success=True, error=None,
+    )
+    rows = store.in_range(start_ts=t - 300, end_ts=t - 100)
+    assert len(rows) == 1
+    assert rows[0]["tool_name"] == "ancient"
+
+
+def test_search_arguments_finds_matching_row(store: AuditStore) -> None:
+    _insert(store, args={"url": "https://example.com/page"})
+    _insert(store, args={"url": "https://other.org"})
+    rows = store.search_arguments(pattern="%example.com%")
+    assert len(rows) == 1
+    assert rows[0]["arguments"]["url"] == "https://example.com/page"
+
+
+def test_search_arguments_no_match_returns_empty(store: AuditStore) -> None:
+    _insert(store, args={"url": "https://other.org"})
+    assert store.search_arguments(pattern="%notpresent%") == []
+
+
+def test_export_pagination(store: AuditStore) -> None:
+    for _ in range(5):
+        _insert(store)
+    page1 = store.export(limit=2, since_id=0)
+    assert len(page1) == 2
+    page2 = store.export(limit=2, since_id=page1[-1]["id"])
+    assert len(page2) == 2
+    # No overlap
+    ids1 = {r["id"] for r in page1}
+    ids2 = {r["id"] for r in page2}
+    assert ids1.isdisjoint(ids2)
+
+
+def test_purge_dry_run_does_not_delete(store: AuditStore) -> None:
+    t = time.time()
+    store.log_call(
+        ts_start=t - 500, ts_end=t - 499, tool_name="old",
+        arguments={}, response={}, success=True, error=None,
+    )
+    count = store.purge(before_ts=t, dry_run=True)
+    assert count == 1
+    assert len(store.recent(10)) == 1  # still there
+
+
+def test_purge_actually_deletes(store: AuditStore) -> None:
+    t = time.time()
+    store.log_call(
+        ts_start=t - 500, ts_end=t - 499, tool_name="old",
+        arguments={}, response={}, success=True, error=None,
+    )
+    _insert(store, tool="keep")  # ts_start ≈ now, won't be purged
+    count = store.purge(before_ts=t - 100, dry_run=False)
+    assert count == 1
+    remaining = store.recent(10)
+    assert len(remaining) == 1
+    assert remaining[0]["tool_name"] == "keep"

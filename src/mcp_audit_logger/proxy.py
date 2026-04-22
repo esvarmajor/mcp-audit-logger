@@ -22,7 +22,7 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 from .config import DownstreamHttp, DownstreamStdio
 
@@ -52,13 +52,12 @@ class DownstreamProxy:
         self._stack = AsyncExitStack()
         try:
             if isinstance(self._config, DownstreamHttp):
-                ctx = streamablehttp_client(
+                # streamable_http_client yields a 2-tuple (read, write)
+                ctx = streamable_http_client(
                     self._config.url,
                     headers=self._config.headers or None,
                 )
-                # streamablehttp_client yields (read, write, get_session_id)
-                transport = await self._stack.enter_async_context(ctx)
-                read, write = transport[0], transport[1]
+                read, write = await self._stack.enter_async_context(ctx)
             else:
                 params = StdioServerParameters(
                     command=self._config.command,

@@ -32,12 +32,16 @@ independent of any individual server's logging. This project is that record.
   to know the logger is there.
 - **Full audit trail in SQLite.** One row per tool call. No external DB, no
   Kafka, nothing to operate.
-- **Four query tools for agents.** An agent connected through the logger can
-  introspect its own call history:
-    - `audit_get_recent_calls`
-    - `audit_get_calls_by_tool`
-    - `audit_get_failed_calls`
-    - `audit_get_call_stats`
+- **Eight query/management tools for agents.** An agent connected through the
+  logger can introspect and manage its own call history:
+    - `audit_get_recent_calls` — newest N calls
+    - `audit_get_calls_by_tool` — filter by tool name
+    - `audit_get_failed_calls` — only errored calls
+    - `audit_get_call_stats` — per-tool aggregate metrics
+    - `audit_get_calls_in_range` — time-bounded slice
+    - `audit_search_arguments` — SQL LIKE search over argument JSON
+    - `audit_export_jsonl` — export as JSONL for offline analysis
+    - `audit_purge` — delete old rows (with dry-run protection)
 - **Streamable HTTP transport.** No SSE — deprecated as of the 2025-03-26 MCP
   spec revision.
 - **Structured JSON logs on stderr.** One JSON object per line, ready for any
@@ -149,6 +153,7 @@ CLI beats env beats file.
 | `db_path`            | `AUDIT_DB_PATH`             | `--db-path`      | `./audit.db`  |
 | `log_level`          | `AUDIT_LOG_LEVEL`           | `--log-level`    | `INFO`        |
 | `max_payload_bytes`  | `AUDIT_MAX_PAYLOAD_BYTES`   | —                | `65536`       |
+| `http_token`         | `AUDIT_HTTP_TOKEN`          | —                | _(none)_      |
 | `downstream.kind`    | (see below)                 | —                | —             |
 
 Downstream via env vars:
@@ -167,12 +172,16 @@ offline analysis.
 
 ## The audit_* tools
 
-| Tool                        | Input                                       | Output                                   |
-| --------------------------- | ------------------------------------------- | ---------------------------------------- |
-| `audit_get_recent_calls`    | `{ "limit": 50 }`                           | Newest-first array of call records.      |
-| `audit_get_calls_by_tool`   | `{ "tool_name": "...", "limit": 50 }`       | Newest-first array filtered by name.     |
-| `audit_get_failed_calls`    | `{ "limit": 50 }`                           | Newest-first array of `success = false`. |
-| `audit_get_call_stats`      | `{}`                                        | Per-tool aggregates (see below).         |
+| Tool                        | Input                                                    | Output                                   |
+| --------------------------- | -------------------------------------------------------- | ---------------------------------------- |
+| `audit_get_recent_calls`    | `{ "limit": 50 }`                                        | Newest-first array of call records.      |
+| `audit_get_calls_by_tool`   | `{ "tool_name": "...", "limit": 50 }`                    | Newest-first array filtered by name.     |
+| `audit_get_failed_calls`    | `{ "limit": 50 }`                                        | Newest-first array of `success = false`. |
+| `audit_get_call_stats`      | `{}`                                                     | Per-tool aggregates (see below).         |
+| `audit_get_calls_in_range`  | `{ "start_ts": 1713600000, "end_ts": 1713700000 }`       | Calls in the given Unix-ts window.       |
+| `audit_search_arguments`    | `{ "pattern": "%example.com%", "limit": 50 }`            | Calls whose arguments match the pattern. |
+| `audit_export_jsonl`        | `{ "limit": 500, "since_id": 0 }`                        | JSONL text, one record per line.         |
+| `audit_purge`               | `{ "before_ts": 1713600000, "dry_run": true }`           | Count of rows deleted (or would-delete). |
 
 A call record looks like:
 
@@ -229,12 +238,28 @@ CREATE TABLE audit_calls (
 The DB runs in WAL mode, so you can `sqlite3 audit.db` and run arbitrary
 queries while the logger is live.
 
+## Bearer auth
+
+If `AUDIT_HTTP_TOKEN` (or `http_token` in the config file) is set, every HTTP
+request to the proxy must include `Authorization: Bearer <token>` or receive
+a `401 Unauthorized` response. Useful when the proxy is exposed on a non-loopback
+address.
+
+```bash
+AUDIT_HTTP_TOKEN=my-secret-token mcp-audit-logger --host 0.0.0.0 --port 8765
+```
+
+```json
+{ "http_token": "my-secret-token" }
+```
+
 ## Development
 
 ```bash
 pip install -e '.[dev]'
-pytest
-ruff check .
+pytest            # storage + server integration tests
+ruff check .      # lint
+mypy src/mcp_audit_logger --ignore-missing-imports
 ```
 
 ## License

@@ -5,6 +5,7 @@
   "db_path": "./audit.db",
   "log_level": "INFO",
   "max_payload_bytes": 65536,
+  "_http_token_comment": "Set http_token to require Authorization: Bearer <token> on every request.",
   "downstream": {
     "kind": "stdio",
     "command": "python",
