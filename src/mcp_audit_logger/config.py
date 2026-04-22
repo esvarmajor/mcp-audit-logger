@@ -70,6 +70,10 @@ class Config:
     # `Authorization: Bearer <token>` or receive a 401 response.
     http_token: str | None = None
 
+    # Delete audit rows older than this many days once per hour.
+    # Set to 0 or None to disable retention (default: no retention).
+    retention_days: int | None = None
+
 
 @overload
 def _env(name: str, default: str) -> str: ...
@@ -91,18 +95,43 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg_data = json.loads(p.read_text())
 
     cfg = Config()
-    cfg.host = str(cfg_data.get("host", _env("AUDIT_HOST", cfg.host)))
-    cfg.port = int(cfg_data.get("port", _env("AUDIT_PORT", str(cfg.port))))
-    cfg.mount_path = str(cfg_data.get("mount_path", _env("AUDIT_MOUNT_PATH", cfg.mount_path)))
-    cfg.db_path = Path(str(cfg_data.get("db_path", _env("AUDIT_DB_PATH", str(cfg.db_path)))))
-    cfg.log_level = str(cfg_data.get("log_level", _env("AUDIT_LOG_LEVEL", cfg.log_level)))
-    cfg.max_payload_bytes = int(
-        cfg_data.get(
-            "max_payload_bytes",
-            _env("AUDIT_MAX_PAYLOAD_BYTES", str(cfg.max_payload_bytes)),
-        )
-    )
+    # Layer: defaults → JSON file → env (later layers win).
+    if "host" in cfg_data:
+        cfg.host = str(cfg_data["host"])
+    if (v := _env("AUDIT_HOST")):
+        cfg.host = v
+
+    if "port" in cfg_data:
+        cfg.port = int(cfg_data["port"])
+    if (v := _env("AUDIT_PORT")):
+        cfg.port = int(v)
+
+    if "mount_path" in cfg_data:
+        cfg.mount_path = str(cfg_data["mount_path"])
+    if (v := _env("AUDIT_MOUNT_PATH")):
+        cfg.mount_path = v
+
+    if "db_path" in cfg_data:
+        cfg.db_path = Path(str(cfg_data["db_path"]))
+    if (v := _env("AUDIT_DB_PATH")):
+        cfg.db_path = Path(v)
+
+    if "log_level" in cfg_data:
+        cfg.log_level = str(cfg_data["log_level"])
+    if (v := _env("AUDIT_LOG_LEVEL")):
+        cfg.log_level = v
+
+    if "max_payload_bytes" in cfg_data:
+        cfg.max_payload_bytes = int(cfg_data["max_payload_bytes"])
+    if (v := _env("AUDIT_MAX_PAYLOAD_BYTES")):
+        cfg.max_payload_bytes = int(v)
+
     cfg.http_token = cfg_data.get("http_token") or _env("AUDIT_HTTP_TOKEN") or None
+
+    if "retention_days" in cfg_data:
+        cfg.retention_days = int(cfg_data["retention_days"]) or None
+    if (v := _env("AUDIT_RETENTION_DAYS")):
+        cfg.retention_days = int(v) or None
 
     downstream_data = cfg_data.get("downstream") or _load_downstream_from_env()
     if downstream_data:

@@ -15,9 +15,12 @@ import argparse
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
+import anyio
 import uvicorn
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
@@ -31,6 +34,38 @@ from .server import build_server
 from .storage import AuditStore
 
 log = logging.getLogger(__name__)
+
+
+def _auth_wrap(
+    expected_token: str | None,
+    inner: Callable[[Scope, Receive, Send], Any],
+) -> Callable[[Scope, Receive, Send], Any]:
+    """Return an ASGI callable that gates `inner` behind bearer-token auth.
+
+    When `expected_token` is None, returns `inner` unchanged (auth disabled).
+    When set, any request without a matching Authorization header gets a 401.
+    """
+    if expected_token is None:
+        return inner
+
+    async def _handler(scope: Scope, receive: Receive, send: Send) -> None:
+        # ASGI header keys are bytes; decode before building the lookup dict.
+        headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+        if headers.get("authorization") != expected_token:
+            await send({
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
+            })
+            await send({
+                "type": "http.response.body",
+                "body": b"Unauthorized",
+                "more_body": False,
+            })
+            return
+        await inner(scope, receive, send)
+
+    return _handler
 
 
 # ---------------------------------------------------------------------- CLI
@@ -102,23 +137,23 @@ async def _run(cfg: Config) -> None:
     if expected_token:
         log.info("auth.bearer_token_enabled")
 
-    async def handle_mcp(scope: Scope, receive: Receive, send: Send) -> None:
-        # Optional bearer auth check — inline to avoid Starlette middleware complexity.
-        if expected_token is not None:
-            headers = {k.lower(): v.decode() for k, v in scope.get("headers", [])}
-            if headers.get("authorization") != expected_token:
-                await send({
-                    "type": "http.response.start",
-                    "status": 401,
-                    "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
-                })
-                await send({
-                    "type": "http.response.body",
-                    "body": b"Unauthorized",
-                    "more_body": False,
-                })
-                return
-        await session_mgr.handle_request(scope, receive, send)
+    handle_mcp = _auth_wrap(expected_token, session_mgr.handle_request)
+
+    async def _retention_loop(store: AuditStore, retention_days: int) -> None:
+        """Delete rows older than `retention_days` once per hour, forever."""
+        interval = 3600.0
+        cutoff_seconds = retention_days * 86400.0
+        while True:
+            await anyio.sleep(interval)
+            try:
+                deleted = store.purge(before_ts=time.time() - cutoff_seconds, dry_run=False)
+                if deleted:
+                    log.info(
+                        "retention.purged",
+                        extra={"rows": deleted, "retention_days": retention_days},
+                    )
+            except Exception:
+                log.exception("retention.purge_failed")
 
     @contextlib.asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
@@ -130,12 +165,23 @@ async def _run(cfg: Config) -> None:
             if proxy is not None:
                 await proxy.start()
                 log.info("downstream.ready", extra={"target": proxy.target_label})
+            if cfg.retention_days:
+                log.info(
+                    "retention.enabled",
+                    extra={"retention_days": cfg.retention_days},
+                )
             log.info(
                 "server.started",
                 extra={"host": cfg.host, "port": cfg.port, "path": cfg.mount_path},
             )
             try:
-                yield
+                if cfg.retention_days:
+                    async with anyio.create_task_group() as tg:
+                        tg.start_soon(_retention_loop, store, cfg.retention_days)
+                        yield
+                        tg.cancel_scope.cancel()
+                else:
+                    yield
             finally:
                 if proxy is not None:
                     await proxy.stop()
