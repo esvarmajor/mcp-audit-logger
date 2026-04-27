@@ -275,14 +275,38 @@ class AuditStore:
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def search_arguments(self, *, pattern: str, limit: int = 50) -> list[dict[str, Any]]:
-        """SQL LIKE search over the serialised arguments JSON column."""
+    def search_arguments(
+        self,
+        *,
+        pattern: str,
+        tool_name: str | None = None,
+        include_response: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """SQL LIKE search over the serialised JSON columns.
+
+        ``include_response=True`` widens the search to also match against the
+        response payload (useful when you remember a substring of what came
+        back rather than what went in). ``tool_name`` is an optional equality
+        filter on the call's tool name.
+        """
         limit = max(1, min(limit, 1000))
+        match_clauses = ["arguments_json LIKE ?"]
+        params: list[Any] = [pattern]
+        if include_response:
+            match_clauses = ["(arguments_json LIKE ? OR response_json LIKE ?)"]
+            params = [pattern, pattern]
+        if tool_name:
+            match_clauses.append("tool_name = ?")
+            params.append(tool_name)
+        sql = (
+            "SELECT * FROM audit_calls "
+            f"WHERE {' AND '.join(match_clauses)} "
+            "ORDER BY id DESC LIMIT ?"
+        )
+        params.append(limit)
         with self._conn() as c:
-            rows = c.execute(
-                "SELECT * FROM audit_calls WHERE arguments_json LIKE ? ORDER BY id DESC LIMIT ?",
-                (pattern, limit),
-            ).fetchall()
+            rows = c.execute(sql, tuple(params)).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def export(self, *, limit: int = 500, since_id: int = 0) -> list[dict[str, Any]]:

@@ -147,6 +147,28 @@ def test_search_arguments_finds_matching_row(store: AuditStore) -> None:
     assert rows[0]["arguments"]["url"] == "https://example.com/page"
 
 
+def test_search_arguments_filters_by_tool_name(store: AuditStore) -> None:
+    _insert(store, tool="fetch", args={"url": "https://example.com/page1"})
+    _insert(store, tool="search", args={"url": "https://example.com/page2"})
+    rows = store.search_arguments(pattern="%example.com%", tool_name="fetch")
+    assert len(rows) == 1
+    assert rows[0]["tool_name"] == "fetch"
+
+
+def test_search_arguments_include_response_finds_in_response(store: AuditStore) -> None:
+    _insert(store, args={"url": "ok"}, response={"text": "the secret keyword is here"})
+    # Default scope (arguments only) misses it
+    assert store.search_arguments(pattern="%secret keyword%") == []
+    # Wider scope finds it
+    rows = store.search_arguments(pattern="%secret keyword%", include_response=True)
+    assert len(rows) == 1
+
+
+def test_search_arguments_response_does_not_match_when_disabled(store: AuditStore) -> None:
+    _insert(store, args={"url": "x"}, response={"text": "needle"})
+    assert store.search_arguments(pattern="%needle%") == []
+
+
 def test_search_arguments_no_match_returns_empty(store: AuditStore) -> None:
     _insert(store, args={"url": "https://other.org"})
     assert store.search_arguments(pattern="%notpresent%") == []

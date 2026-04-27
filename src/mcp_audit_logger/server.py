@@ -58,6 +58,14 @@ class _SearchArgsModel(BaseModel):
         description="SQL LIKE pattern searched inside the serialised arguments JSON. "
         'Use % as wildcard — e.g. "%example.com%" or "%some_key%".'
     )
+    tool_name: str | None = Field(
+        default=None,
+        description="Optional exact-match filter on tool_name. Narrow large search results.",
+    )
+    include_response: bool = Field(
+        default=False,
+        description="If true, also match the pattern against the response payload column.",
+    )
     limit: int = Field(default=50, ge=1, le=1000)
 
 
@@ -125,8 +133,10 @@ AUDIT_TOOLS: list[types.Tool] = [
     types.Tool(
         name="audit_search_arguments",
         description=(
-            "Full-text LIKE search over the serialised argument JSON of every call. "
-            'Use SQL wildcard syntax: e.g. pattern="%example.com%".'
+            "Full-text LIKE search over call payloads. Default scope is the "
+            'arguments JSON; set include_response=true to search both. Use SQL '
+            'wildcard syntax — e.g. pattern="%example.com%". Optionally narrow '
+            "by tool_name."
         ),
         inputSchema=_SearchArgsModel.model_json_schema(),
     ),
@@ -267,7 +277,12 @@ def _run_audit_tool(
         out = store.in_range(start_ts=a4.start_ts, end_ts=a4.end_ts, limit=a4.limit)
     elif name == "audit_search_arguments":
         a5 = _SearchArgsModel.model_validate(arguments)
-        out = store.search_arguments(pattern=a5.pattern, limit=a5.limit)
+        out = store.search_arguments(
+            pattern=a5.pattern,
+            tool_name=a5.tool_name,
+            include_response=a5.include_response,
+            limit=a5.limit,
+        )
     elif name == "audit_get_slowest_calls":
         a_slow = _SlowestArgs.model_validate(arguments)
         out = store.slowest(limit=a_slow.limit)
