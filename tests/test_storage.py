@@ -238,6 +238,70 @@ def test_export_csv_handles_null_columns(store: AuditStore) -> None:
     assert rows[0]["client_info"] == ""
 
 
+def test_count_no_filters_returns_total(store: AuditStore) -> None:
+    for _ in range(5):
+        _insert(store)
+    assert store.count() == 5
+
+
+def test_count_filters_by_tool_name(store: AuditStore) -> None:
+    _insert(store, tool="fetch")
+    _insert(store, tool="fetch")
+    _insert(store, tool="search")
+    assert store.count(tool_name="fetch") == 2
+    assert store.count(tool_name="search") == 1
+    assert store.count(tool_name="missing") == 0
+
+
+def test_count_filters_by_success(store: AuditStore) -> None:
+    _insert(store, success=True)
+    _insert(store, success=True)
+    _insert(store, success=False, error="x")
+    assert store.count(success=True) == 2
+    assert store.count(success=False) == 1
+
+
+def test_count_filters_by_since_ts(store: AuditStore) -> None:
+    t = time.time()
+    store.log_call(
+        ts_start=t - 1000, ts_end=t - 999, tool_name="old",
+        arguments={}, response={}, success=True, error=None,
+    )
+    _insert(store)  # ts_start ≈ now
+    assert store.count(since_ts=t - 100) == 1
+
+
+def test_count_combines_filters_with_and(store: AuditStore) -> None:
+    t = time.time()
+    _insert(store, tool="fetch", success=True)
+    _insert(store, tool="fetch", success=False, error="x")
+    _insert(store, tool="search", success=False, error="y")
+    assert store.count(tool_name="fetch", success=False) == 1
+    assert store.count(success=False, since_ts=t - 100) == 2
+
+
+def test_recent_failures_within_window(store: AuditStore) -> None:
+    t = time.time()
+    # Old failure: outside the 60s window
+    store.log_call(
+        ts_start=t - 1000, ts_end=t - 999, tool_name="old",
+        arguments={}, response={}, success=False, error="old_err",
+    )
+    # Recent failure: inside the window
+    _insert(store, tool="fresh", success=False, error="new_err")
+    rows = store.recent_failures(window_seconds=60)
+    assert len(rows) == 1
+    assert rows[0]["tool_name"] == "fresh"
+
+
+def test_recent_failures_excludes_successes(store: AuditStore) -> None:
+    _insert(store, success=True)
+    _insert(store, success=False, error="x")
+    rows = store.recent_failures(window_seconds=3600)
+    assert len(rows) == 1
+    assert rows[0]["success"] is False
+
+
 def test_purge_dry_run_does_not_delete(store: AuditStore) -> None:
     t = time.time()
     store.log_call(

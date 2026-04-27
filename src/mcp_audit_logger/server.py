@@ -89,6 +89,26 @@ class _SlowestArgs(BaseModel):
     limit: int = Field(default=20, ge=1, le=1000)
 
 
+class _CountArgs(BaseModel):
+    tool_name: str | None = Field(default=None, description="Optional exact-match filter.")
+    success: bool | None = Field(
+        default=None,
+        description="Optional outcome filter — true=successes only, false=failures only.",
+    )
+    since_ts: float | None = Field(
+        default=None,
+        description="Optional Unix-ts lower bound on ts_start.",
+    )
+
+
+class _RecentFailuresArgs(BaseModel):
+    window_seconds: float = Field(
+        gt=0,
+        description="Look back this many seconds from now (e.g. 300 for last 5 minutes).",
+    )
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
 class _TopErrorsArgs(BaseModel):
     limit: int = Field(default=20, ge=1, le=1000)
 
@@ -146,6 +166,24 @@ AUDIT_TOOLS: list[types.Tool] = [
         name="audit_get_failed_calls",
         description="Return the most recent N failed tool calls (success = false only).",
         inputSchema=_FailedArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_get_recent_failures",
+        description=(
+            "Return failed calls whose ts_start is within the last "
+            "`window_seconds`. Pairs nicely with dashboards — 'show me "
+            "everything that broke in the last 5 minutes' is one call."
+        ),
+        inputSchema=_RecentFailuresArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_count",
+        description=(
+            "Return COUNT(*) of audit rows matching the optional filters: "
+            "tool_name (equality), success (true/false), since_ts (lower "
+            "bound on ts_start). Filters AND together; omit to leave open."
+        ),
+        inputSchema=_CountArgs.model_json_schema(),
     ),
     types.Tool(
         name="audit_get_call_stats",
@@ -319,6 +357,17 @@ def _run_audit_tool(
     elif name == "audit_get_failed_calls":
         a3 = _FailedArgs.model_validate(arguments)
         out = store.failed(limit=a3.limit)
+    elif name == "audit_get_recent_failures":
+        a_rf = _RecentFailuresArgs.model_validate(arguments)
+        out = store.recent_failures(window_seconds=a_rf.window_seconds, limit=a_rf.limit)
+    elif name == "audit_count":
+        a_cnt = _CountArgs.model_validate(arguments)
+        n = store.count(
+            tool_name=a_cnt.tool_name,
+            success=a_cnt.success,
+            since_ts=a_cnt.since_ts,
+        )
+        return [types.TextContent(type="text", text=json.dumps({"count": n}))]
     elif name == "audit_get_call_stats":
         out = store.stats()
     elif name == "audit_get_calls_in_range":

@@ -431,6 +431,56 @@ class AuditStore:
             writer.writerow(row)
         return buf.getvalue()
 
+    def count(
+        self,
+        *,
+        tool_name: str | None = None,
+        success: bool | None = None,
+        since_ts: float | None = None,
+    ) -> int:
+        """Return COUNT(*) over audit_calls with optional filters.
+
+        Lightweight cousin to ``stats()`` — when you only need the
+        number, not the per-tool breakdown. Filters AND together; pass
+        ``None`` to leave a dimension unconstrained.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if tool_name is not None:
+            clauses.append("tool_name = ?")
+            params.append(tool_name)
+        if success is not None:
+            clauses.append("success = ?")
+            params.append(1 if success else 0)
+        if since_ts is not None:
+            clauses.append("ts_start >= ?")
+            params.append(since_ts)
+        sql = "SELECT COUNT(*) FROM audit_calls"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        with self._conn() as c:
+            return int(c.execute(sql, tuple(params)).fetchone()[0])
+
+    def recent_failures(
+        self, *, window_seconds: float, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return failed calls whose ts_start is within the last ``window_seconds``.
+
+        Pairs nicely with operational dashboards: "show me everything
+        that broke in the last 5 minutes" is one call.
+        """
+        import time as _time
+
+        limit = max(1, min(limit, 1000))
+        cutoff = _time.time() - window_seconds
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE success = 0 AND ts_start >= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def db_size_bytes(self) -> int:
         """Return the on-disk size of the SQLite file in bytes (0 if missing)."""
         try:

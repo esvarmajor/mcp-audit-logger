@@ -395,6 +395,53 @@ async def test_audit_vacuum_returns_size_report(server: Server, store: AuditStor
 
 
 @pytest.mark.asyncio
+async def test_audit_count_returns_total(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for _ in range(3):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+        )
+    result = await _call(server, "audit_count", {})
+    assert json.loads(result.content[0].text) == {"count": 3}
+
+
+@pytest.mark.asyncio
+async def test_audit_count_with_filters(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=False, error="x",
+    )
+    result = await _call(server, "audit_count", {"tool_name": "fetch", "success": False})
+    assert json.loads(result.content[0].text) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_audit_get_recent_failures(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t - 5000, ts_end=t - 4999, tool_name="old_fail",
+        arguments={}, response={}, success=False, error="old",
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fresh_fail",
+        arguments={}, response={}, success=False, error="fresh",
+    )
+    result = await _call(server, "audit_get_recent_failures", {"window_seconds": 60})
+    data = json.loads(result.content[0].text)
+    assert len(data) == 1
+    assert data[0]["tool_name"] == "fresh_fail"
+
+
+@pytest.mark.asyncio
 async def test_invalid_arguments_returns_error(server: Server) -> None:
     # limit must be ge=1; the SDK's jsonschema validation fires first
     result = await _call(server, "audit_get_recent_calls", {"limit": -5})
