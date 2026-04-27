@@ -32,7 +32,7 @@ independent of any individual server's logging. This project is that record.
   to know the logger is there.
 - **Full audit trail in SQLite.** One row per tool call. No external DB, no
   Kafka, nothing to operate.
-- **Thirteen query/management tools for agents.** An agent connected through the
+- **Fourteen query/management tools for agents.** An agent connected through the
   logger can introspect and manage its own call history:
     - `audit_get_recent_calls` — newest N calls
     - `audit_get_call_by_id` — fetch a single row for deep-dive debugging
@@ -45,6 +45,7 @@ independent of any individual server's logging. This project is that record.
     - `audit_get_calls_in_range` — time-bounded slice
     - `audit_search_arguments` — SQL LIKE search over argument JSON
     - `audit_export_jsonl` — export as JSONL for offline analysis
+    - `audit_export_csv` — export as CSV for spreadsheet workflows
     - `audit_vacuum` — run SQLite VACUUM to reclaim space after a purge
     - `audit_purge` — delete old rows (with dry-run protection)
 - **Streamable HTTP transport.** No SSE — deprecated as of the 2025-03-26 MCP

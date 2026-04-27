@@ -204,6 +204,22 @@ async def test_audit_search_arguments(server: Server, store: AuditStore) -> None
 
 
 @pytest.mark.asyncio
+async def test_audit_export_csv_has_header(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={"url": "x"}, response={"ok": True},
+        success=True, error=None,
+    )
+    result = await _call(server, "audit_export_csv", {"limit": 10, "since_id": 0})
+    text = result.content[0].text
+    lines = text.strip().splitlines()
+    assert lines[0].startswith("id,ts_start,ts_end")
+    assert len(lines) == 2  # header + 1 row
+
+
+@pytest.mark.asyncio
 async def test_audit_export_jsonl(server: Server, store: AuditStore) -> None:
     import time
     t = time.time()

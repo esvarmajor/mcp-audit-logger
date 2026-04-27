@@ -13,6 +13,8 @@ Design notes
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sqlite3
 import threading
@@ -369,6 +371,45 @@ class AuditStore:
                 conn.execute("VACUUM")
             finally:
                 conn.close()
+
+    _CSV_FIELDS = (
+        "id",
+        "ts_start",
+        "ts_end",
+        "duration_ms",
+        "tool_name",
+        "success",
+        "error",
+        "arguments",
+        "response",
+        "client_info",
+        "downstream_target",
+    )
+
+    def export_csv(self, *, limit: int = 500, since_id: int = 0) -> str:
+        """Return rows as CSV text with a header row.
+
+        JSON columns (arguments, response) are re-serialized as single
+        CSV cells. Empty cells are used for SQL NULL values. Field order
+        matches `_CSV_FIELDS` and is intentionally stable so downstream
+        consumers can rely on it.
+        """
+        rows = self.export(limit=limit, since_id=since_id)
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(self._CSV_FIELDS))
+        writer.writeheader()
+        for r in rows:
+            row = {k: r.get(k) for k in self._CSV_FIELDS}
+            for json_col in ("arguments", "response"):
+                v = row[json_col]
+                row[json_col] = "" if v is None else json.dumps(v, default=str)
+            row["error"] = "" if row["error"] is None else row["error"]
+            row["client_info"] = "" if row["client_info"] is None else row["client_info"]
+            row["downstream_target"] = (
+                "" if row["downstream_target"] is None else row["downstream_target"]
+            )
+            writer.writerow(row)
+        return buf.getvalue()
 
     def db_size_bytes(self) -> int:
         """Return the on-disk size of the SQLite file in bytes (0 if missing)."""

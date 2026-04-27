@@ -154,6 +154,16 @@ AUDIT_TOOLS: list[types.Tool] = [
         inputSchema=_SearchArgsModel.model_json_schema(),
     ),
     types.Tool(
+        name="audit_export_csv",
+        description=(
+            "Export up to `limit` audit rows as CSV text with a header row, "
+            "optionally filtered to rows with id > since_id. Fields are: "
+            "id, ts_start, ts_end, duration_ms, tool_name, success, error, "
+            "arguments (JSON), response (JSON), client_info, downstream_target."
+        ),
+        inputSchema=_ExportArgs.model_json_schema(),
+    ),
+    types.Tool(
         name="audit_export_jsonl",
         description=(
             "Export up to `limit` audit rows as JSONL text (one JSON object per line), "
@@ -332,6 +342,10 @@ def _run_audit_tool(
         rows = store.export(limit=a6.limit, since_id=a6.since_id)
         lines = "\n".join(json.dumps(r, default=str) for r in rows)
         return [types.TextContent(type="text", text=lines or "(no records)")]
+    elif name == "audit_export_csv":
+        a_csv = _ExportArgs.model_validate(arguments)
+        csv_text = store.export_csv(limit=a_csv.limit, since_id=a_csv.since_id)
+        return [types.TextContent(type="text", text=csv_text or "(no records)")]
     elif name == "audit_purge":
         a7 = _PurgeArgs.model_validate(arguments)
         count = store.purge(before_ts=a7.before_ts, dry_run=a7.dry_run)

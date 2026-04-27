@@ -200,6 +200,44 @@ def test_export_pagination(store: AuditStore) -> None:
     assert ids1.isdisjoint(ids2)
 
 
+def test_export_csv_has_header_and_one_row_per_record(store: AuditStore) -> None:
+    import csv as _csv
+    import io as _io
+
+    _insert(store, tool="fetch", args={"url": "https://x.com"}, response={"ok": True})
+    _insert(store, tool="search", args={"q": "kittens"}, response={"hits": 3})
+    text = store.export_csv()
+    reader = _csv.DictReader(_io.StringIO(text))
+    rows = list(reader)
+    assert len(rows) == 2
+    assert reader.fieldnames is not None
+    assert "tool_name" in reader.fieldnames
+    assert "arguments" in reader.fieldnames
+    assert "response" in reader.fieldnames
+    # JSON columns survive a CSV round-trip as serialized strings
+    args = next(r["arguments"] for r in rows if r["tool_name"] == "fetch")
+    assert "https://x.com" in args
+
+
+def test_export_csv_empty_returns_just_header(tmp_path: Path) -> None:
+    s = AuditStore(tmp_path / "audit.db")
+    text = s.export_csv()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    assert lines[0].startswith("id,ts_start,ts_end")
+
+
+def test_export_csv_handles_null_columns(store: AuditStore) -> None:
+    import csv as _csv
+    import io as _io
+
+    _insert(store, tool="fetch", success=True, error=None)
+    text = store.export_csv()
+    rows = list(_csv.DictReader(_io.StringIO(text)))
+    assert rows[0]["error"] == ""
+    assert rows[0]["client_info"] == ""
+
+
 def test_purge_dry_run_does_not_delete(store: AuditStore) -> None:
     t = time.time()
     store.log_call(
