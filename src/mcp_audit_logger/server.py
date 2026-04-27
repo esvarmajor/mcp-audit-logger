@@ -38,6 +38,10 @@ class _RecentArgs(BaseModel):
     limit: int = Field(default=50, ge=1, le=1000)
 
 
+class _GetByIdArgs(BaseModel):
+    call_id: int = Field(ge=1, description="The primary-key id of the audit row to fetch.")
+
+
 class _ByToolArgs(BaseModel):
     tool_name: str
     limit: int = Field(default=50, ge=1, le=1000)
@@ -99,6 +103,15 @@ class _PurgeArgs(BaseModel):
 # --------------------------------------------------------------- tool definitions
 
 AUDIT_TOOLS: list[types.Tool] = [
+    types.Tool(
+        name="audit_get_call_by_id",
+        description=(
+            "Return the full audit row for a specific call by primary key. "
+            "Useful for deep-dive debugging when you've found a row id via "
+            "audit_get_recent_calls or audit_search_arguments."
+        ),
+        inputSchema=_GetByIdArgs.model_json_schema(),
+    ),
     types.Tool(
         name="audit_get_recent_calls",
         description=(
@@ -261,6 +274,12 @@ def build_server(
 def _run_audit_tool(
     store: AuditStore, name: str, arguments: dict[str, Any]
 ) -> list[types.ContentBlock]:
+    if name == "audit_get_call_by_id":
+        a_id = _GetByIdArgs.model_validate(arguments)
+        row = store.get_by_id(a_id.call_id)
+        if row is None:
+            return [types.TextContent(type="text", text=f"No audit row with id={a_id.call_id}")]
+        return [types.TextContent(type="text", text=json.dumps(row, indent=2, default=str))]
     if name == "audit_get_recent_calls":
         a = _RecentArgs.model_validate(arguments)
         out: Any = store.recent(limit=a.limit)

@@ -54,6 +54,19 @@ def test_log_and_recent_round_trip(store: AuditStore) -> None:
     assert row["duration_ms"] == pytest.approx(100.0, rel=0.2)
 
 
+def test_get_by_id_returns_matching_row(store: AuditStore) -> None:
+    rid = _insert(store, tool="fetch", args={"url": "https://x.com"})
+    row = store.get_by_id(rid)
+    assert row is not None
+    assert row["id"] == rid
+    assert row["tool_name"] == "fetch"
+    assert row["arguments"] == {"url": "https://x.com"}
+
+
+def test_get_by_id_returns_none_for_missing(store: AuditStore) -> None:
+    assert store.get_by_id(99999) is None
+
+
 def test_recent_is_newest_first(store: AuditStore) -> None:
     _insert(store, tool="a")
     _insert(store, tool="b")

@@ -164,6 +164,15 @@ class AuditStore:
             )
             return int(cur.lastrowid or 0)
 
+    def get_by_id(self, call_id: int) -> dict[str, Any] | None:
+        """Return a single audit row by primary key, or None if missing."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM audit_calls WHERE id = ?",
+                (call_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 1000))
         with self._conn() as c:

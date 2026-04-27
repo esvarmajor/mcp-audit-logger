@@ -91,6 +91,27 @@ async def test_list_tools_returns_audit_tools(server: Server) -> None:
 
 
 @pytest.mark.asyncio
+async def test_audit_get_call_by_id_hit(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    rid = store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={"url": "x"}, response={"ok": True},
+        success=True, error=None,
+    )
+    result = await _call(server, "audit_get_call_by_id", {"call_id": rid})
+    data = json.loads(result.content[0].text)
+    assert data["id"] == rid
+    assert data["tool_name"] == "fetch"
+
+
+@pytest.mark.asyncio
+async def test_audit_get_call_by_id_miss(server: Server) -> None:
+    result = await _call(server, "audit_get_call_by_id", {"call_id": 12345})
+    assert "No audit row with id=12345" in result.content[0].text
+
+
+@pytest.mark.asyncio
 async def test_audit_get_recent_calls_empty(server: Server) -> None:
     result = await _call(server, "audit_get_recent_calls", {})
     assert result.isError is not True
