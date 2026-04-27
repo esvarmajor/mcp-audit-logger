@@ -313,6 +313,14 @@ AUDIT_HTTP_TOKEN=my-secret-token mcp-audit-logger --host 0.0.0.0 --port 8765
 ## Development
 
 ```bash
+make install      # create venv and install in editable mode
+make ci           # lint + type-check + run tests
+make smoke        # end-to-end smoke test
+```
+
+Or manually, without the Makefile:
+
+```bash
 pip install -e '.[dev]'
 pytest            # storage + server integration tests
 ruff check .      # lint

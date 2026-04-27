@@ -1,119 +1,95 @@
 # Gameplan — follow-up work
 
-This doc is the handoff from the foundation pass. What's **done** is listed for
-context; everything under "Open" is free to pick up next.
+This doc is the running handoff. What's **done** is listed for context;
+everything under "Open" is fair game next.
 
 ---
 
 ## Done
 
+### Foundation (0.1.0)
+
 - Core proxy for stdio + Streamable HTTP downstreams (`proxy.py`).
 - SQLite audit store with WAL mode and payload truncation (`storage.py`).
-- Streamable HTTP transport wired through `StreamableHTTPSessionManager` with a
-  Starlette lifespan that shares the anyio task-group scope across proxy and
-  session manager (avoids the "cancel scope in different task" bug).
-- 8 `audit_*` query tools: `get_recent_calls`, `get_calls_by_tool`,
-  `get_failed_calls`, `get_call_stats`, `get_calls_in_range`,
-  `search_arguments`, `export_jsonl`, `purge`.
+- Streamable HTTP transport via `StreamableHTTPSessionManager` with a
+  Starlette lifespan that shares the anyio task-group scope.
+- Eight `audit_*` query tools.
 - Optional bearer token auth on the HTTP endpoint (`AUDIT_HTTP_TOKEN`).
 - Config loader with CLI > env > file > defaults precedence.
 - Structured JSON logging on stderr.
-- 26 passing tests (14 storage + 12 in-process server integration).
-- CI workflow matrix: Python 3.10/3.11/3.12 × ruff + mypy + pytest.
-- Release workflow: PyPI trusted-publisher on tag push.
-- Verified e2e against `mcp-server-fetch` (stdio downstream).
+- Time-based retention (`AUDIT_RETENTION_DAYS`, hourly purge loop).
+- CI matrix (Python 3.10/3.11/3.12 × ruff + mypy + pytest) and PyPI
+  trusted-publisher release workflow.
+
+### 0.2.0
+
+- **`audit_get_slowest_calls`** — N slowest calls overall.
+- **`audit_get_top_errors`** — `(tool, error)` group counts.
+- **`audit_get_top_consumers`** — per-client call/error counts.
+- **`audit_get_call_by_id`** — single-row lookup.
+- **`audit_vacuum`** — SQLite VACUUM with size-before/after report.
+- **p50 / p95** in `audit_get_call_stats`.
+- **`audit_search_arguments`** gained `tool_name` filter and
+  `include_response` flag.
+- **Prometheus `/metrics`** endpoint, opt-in (`AUDIT_ENABLE_METRICS`).
+  No `prometheus_client` dep — synthesized from `store.stats()` per scrape.
+- **Always-on `/healthz`** for k8s-style probes. Reports DB writability +
+  downstream session status; never gated by auth.
+- **`client_info` populated per row** via a `ContextVar` set in the outer
+  ASGI wrapper. Captures IP, truncated UA, and a presence marker for the
+  bearer token (never the token itself).
+- **`scripts/smoke.py`** — end-to-end smoke test that boots the proxy and
+  round-trips an `audit_get_recent_calls` over real Streamable HTTP.
+- **HTTP downstream header propagation** unit tests
+  (`tests/test_proxy.py`).
+- **`--version`** CLI flag.
+- **CHANGELOG.md** tracking the 0.2.0 release.
+- **Makefile** with the common dev targets (lint/test/smoke/run).
+
+101 tests passing.
+
+---
 
 ## Open
 
-### 1. Verify the Streamable HTTP downstream path end-to-end
+### 1. Downstream reconnection / supervision
 
-The stdio downstream was smoke-tested against `mcp-server-fetch`. The HTTP
-downstream path has **not** been exercised against a real server. The SDK's
-`streamable_http_client` does not accept a `headers=` kwarg directly; we now
-route custom headers through a user-provided `httpx.AsyncClient` managed by our
-`AsyncExitStack`. That code path needs a live test.
+Still the most architecturally interesting open item. Design doc at
+[`docs/reconnection-design.md`](docs/reconnection-design.md) is current
+and covers the anyio cancel-scope pitfall, supervisor task layout,
+backoff schedule, and call-timeout behavior during reconnect. The
+design has been thought through; what remains is the careful
+implementation. Touches the most fragile part of the code — give it a
+worktree and a cup of coffee.
 
-**How:** Pick any public Streamable HTTP MCP server (or run a second
-`mcp-audit-logger` with no downstream as a stub), set `AUDIT_DOWNSTREAM_URL`
-and `AUDIT_DOWNSTREAM_HEADERS`, confirm `tools/list` proxies through and an
-audit row lands for a proxied call. Add a unit test that mocks
-`streamable_http_client` and asserts the `httpx.AsyncClient` we built carries
-the configured headers.
+### 2. Verify the Streamable HTTP downstream path against a live server
 
-### 2. Downstream reconnection / supervision
+The unit-test half landed in 0.2.0 (`tests/test_proxy.py` mocks the SDK
+and asserts header propagation). Still missing: a live round-trip
+against a real Streamable HTTP MCP server (or a second
+`mcp-audit-logger` instance running with no downstream as a stub).
 
-If the downstream stdio child dies mid-session, we currently surface an
-exception on the next call and never try to re-establish the session. The user
-has to restart the proxy.
+Adding this to `scripts/smoke.py` behind a `--http-downstream URL`
+flag would be the cleanest way.
 
-This is the most architecturally interesting open item — it requires a
-supervisor task inside the lifespan's task group that:
-- Watches `ClientSession` health (heartbeat ping or failed-call threshold).
-- Tears down the current `AsyncExitStack` on failure.
-- Re-runs `DownstreamProxy.start()` with backoff.
-- Quiesces in-flight `proxy.call_tool` callers during the reconnect window
-  (either fail-fast with a "reconnecting" error, or queue with a bounded
-  wait).
+### 3. Size-based DB rotation
 
-The anyio cancel-scope pitfall we hit during initial implementation
-(see commit `c76f248`) applies here too: whatever task enters the
-`stdio_client` context must also exit it. Recommended approach: have a single
-supervisor task own `start()`/`stop()` and expose `call_tool` as a method that
-awaits a `ready` event — callers never touch the stack directly.
+Time-based retention shipped in 0.1.0, and `audit_vacuum` shipped in
+0.2.0. Size-based rotation (`audit.db` → `audit.db.YYYYMMDDHHMM` when
+it crosses N MB, then re-create) is still on the table but rarely
+needed in practice — most operators are fine with retention + vacuum.
+Punt unless someone files an issue.
 
-**Good first task for Sonnet.** Needs a design doc before code.
+### 4. Health-ping for downstream session
 
-### 3. Retention / rotation
-
-`audit.db` grows unbounded. Two orthogonal options:
-
-- **Time-based retention.** A background task in `__main__._run` that runs
-  `store.purge(before_ts=now - retention_seconds, dry_run=False)` every hour.
-  New config key: `AUDIT_RETENTION_DAYS`.
-- **Size-based rotation.** Rename `audit.db` to `audit.db.YYYYMMDDHHMM`
-  when it crosses N MB and re-create. Harder because existing sqlite
-  connections would break; probably only worth doing if retention isn't
-  enough.
-
-Start with time-based. The `store.purge` implementation already exists.
-
-### 4. Client info capture
-
-`AuditStore.log_call` has a `client_info` column that is always `None` in
-practice. We can populate it from the Starlette scope in the auth/handler
-layer: client IP (`scope["client"]`), user-agent, and a redacted label for
-the bearer token in use (e.g. first 4 + last 4 chars) if auth is enabled. This
-requires plumbing the request scope into the `Server` call-tool handler,
-which the MCP SDK doesn't expose directly — the clean path is a
-`contextvars.ContextVar` set in `handle_mcp` before `session_mgr.handle_request`
-and read in `_proxied_call`.
-
-### 5. Tests for auth middleware and config precedence
-
-Straightforward — `__main__.py`'s inline bearer check and `config.load_config`'s
-precedence rules aren't under test. Use Starlette's `TestClient` for the
-auth middleware; for config, write to `tmp_path` + `monkeypatch.setenv` and
-assert the resolved `Config` fields.
-
-### 6. Prometheus `/metrics` endpoint
-
-Optional but cheap once the lifespan is already there. Mount `/metrics` on the
-same Starlette app. Counter `mcp_calls_total{tool,success}` and histogram
-`mcp_call_duration_seconds{tool}`. Pull from the existing `log.info`
-instrumentation points in `_proxied_call`.
-
-### 7. Smoke script
-
-`scripts/smoke.sh` that boots the proxy against a known downstream, does a
-`tools/list` + `tools/call` + `audit_get_recent_calls` round-trip, and exits
-non-zero on failure. Great for catching SDK-version-drift breakage in CI
-before it hits users.
+`/healthz` reports `proxy._session is not None`, which catches process
+death but not silent TCP drops where calls happen infrequently. The
+reconnection design (item 1) has a periodic ping built in; defer until
+that lands.
 
 ---
 
 ## Explicitly out of scope
-
-Don't let the review bike-shed pull these in — they're their own projects:
 
 - Resources / prompts pass-through. (Core brief was tool-call auditing.)
 - Multi-downstream fan-out. (One logger, one downstream — keep it simple.)
