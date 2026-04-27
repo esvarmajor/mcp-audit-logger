@@ -300,6 +300,18 @@ ruff check .      # lint
 mypy src/mcp_audit_logger --ignore-missing-imports
 ```
 
+### Smoke test
+
+`scripts/smoke.py` boots the proxy, opens a real Streamable HTTP MCP
+session against it, lists tools, and round-trips a call to
+`audit_get_recent_calls`. It exits non-zero on any failure — useful for
+catching SDK-version drift that unit tests don't see.
+
+```bash
+python scripts/smoke.py        # exit 0 on success
+SMOKE_PORT=8800 ./scripts/smoke.sh  # alternate port via wrapper
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
