@@ -178,6 +178,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--db-path", help="SQLite DB file (default ./audit.db).")
     p.add_argument("--mount-path", help="URL path for the MCP endpoint (default /mcp).")
     p.add_argument("--log-level", help="Log level: DEBUG, INFO, WARNING, ERROR (default INFO).")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate config and exit (no server start). Exits 0 if config loads cleanly.",
+    )
     return p.parse_args()
 
 
@@ -323,6 +328,16 @@ def main() -> None:
     cfg = load_config(args.config)
     cfg = _apply_cli_overrides(cfg, args)
     configure_logging(cfg.log_level)
+    if args.check:
+        # Validation-only mode for CI / pre-deploy checks.
+        downstream_label = (
+            cfg.downstream.kind if cfg.downstream is not None else "(none)"
+        )
+        print(
+            f"config OK — host={cfg.host} port={cfg.port} db={cfg.db_path} "
+            f"downstream={downstream_label}"
+        )
+        return
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(cfg))
 

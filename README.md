@@ -1,5 +1,9 @@
 # mcp-audit-logger
 
+[![CI](https://github.com/esvarmajor/mcp-audit-logger/actions/workflows/ci.yml/badge.svg)](https://github.com/esvarmajor/mcp-audit-logger/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 A transparent middleware proxy for the [Model Context Protocol](https://modelcontextprotocol.io/).
 It sits between any MCP client and any MCP server, forwards every tool call untouched,
 and records a full audit trail to a local SQLite database — arguments, response,
@@ -151,6 +155,16 @@ replace the direct server entry with one that points at the logger:
 ```
 
 See `examples/claude_desktop_config.json` for a full example.
+
+### Validate config without starting the server
+
+```bash
+mcp-audit-logger --config ./examples/config.json --check
+# config OK — host=127.0.0.1 port=8765 db=./audit.db downstream=stdio
+```
+
+Useful for CI / pre-deploy checks. Exits 0 on a clean parse, non-zero
+otherwise.
 
 ## Configuration reference
 

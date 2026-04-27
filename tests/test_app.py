@@ -224,6 +224,19 @@ def test_config_metrics_enabled_via_file(tmp_path: Path) -> None:
     assert cfg.metrics_path == "/m"
 
 
+def test_main_check_mode_does_not_start_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--check should print a config summary and return without booting."""
+    from mcp_audit_logger.__main__ import main
+
+    monkeypatch.setattr("sys.argv", ["mcp-audit-logger", "--check"])
+    main()  # Should not raise; should not block.
+    captured = capsys.readouterr()
+    assert "config OK" in captured.out
+    assert "host=" in captured.out
+
+
 def test_config_health_path_default() -> None:
     assert load_config().health_path == "/healthz"
 
