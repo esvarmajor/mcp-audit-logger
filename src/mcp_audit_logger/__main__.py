@@ -29,6 +29,8 @@ from starlette.types import Receive, Scope, Send
 
 from .config import Config, load_config
 from .logging_config import configure_logging
+from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from .metrics import render as render_metrics
 from .proxy import DownstreamProxy
 from .server import build_server
 from .storage import AuditStore
@@ -66,6 +68,30 @@ def _auth_wrap(
         await inner(scope, receive, send)
 
     return _handler
+
+
+def _make_metrics_handler(store: AuditStore) -> Callable[[Scope, Receive, Send], Any]:
+    """Return an ASGI callable that emits Prometheus text exposition for `store`."""
+    body_type = METRICS_CONTENT_TYPE.encode("utf-8")
+
+    async def _metrics(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("method", "GET") not in ("GET", "HEAD"):
+            await send({
+                "type": "http.response.start",
+                "status": 405,
+                "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
+            })
+            await send({"type": "http.response.body", "body": b"Method Not Allowed"})
+            return
+        body = render_metrics(store).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [[b"content-type", body_type]],
+        })
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    return _metrics
 
 
 # ---------------------------------------------------------------------- CLI
@@ -187,10 +213,13 @@ async def _run(cfg: Config) -> None:
                     await proxy.stop()
                 log.info("server.stopped")
 
-    app = Starlette(
-        routes=[Mount(cfg.mount_path, app=handle_mcp)],
-        lifespan=lifespan,
-    )
+    routes = [Mount(cfg.mount_path, app=handle_mcp)]
+    if cfg.enable_metrics:
+        metrics_handler = _auth_wrap(expected_token, _make_metrics_handler(store))
+        routes.append(Mount(cfg.metrics_path, app=metrics_handler))
+        log.info("metrics.enabled", extra={"path": cfg.metrics_path})
+
+    app = Starlette(routes=routes, lifespan=lifespan)
 
     uvicorn_cfg = uvicorn.Config(
         app,

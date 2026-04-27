@@ -295,6 +295,13 @@ class AuditStore:
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def db_size_bytes(self) -> int:
+        """Return the on-disk size of the SQLite file in bytes (0 if missing)."""
+        try:
+            return self._db_path.stat().st_size
+        except FileNotFoundError:
+            return 0
+
     def purge(self, *, before_ts: float, dry_run: bool = True) -> int:
         """Delete rows with ts_start < before_ts. Returns the number of rows affected."""
         with self._lock, self._conn() as c:

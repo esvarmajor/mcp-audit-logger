@@ -156,6 +156,9 @@ CLI beats env beats file.
 | `log_level`          | `AUDIT_LOG_LEVEL`           | `--log-level`    | `INFO`        |
 | `max_payload_bytes`  | `AUDIT_MAX_PAYLOAD_BYTES`   | —                | `65536`       |
 | `http_token`         | `AUDIT_HTTP_TOKEN`          | —                | _(none)_      |
+| `retention_days`     | `AUDIT_RETENTION_DAYS`      | —                | _(none)_      |
+| `enable_metrics`     | `AUDIT_ENABLE_METRICS`      | —                | `false`       |
+| `metrics_path`       | `AUDIT_METRICS_PATH`        | —                | `/metrics`    |
 | `downstream.kind`    | (see below)                 | —                | —             |
 
 Downstream via env vars:
@@ -243,6 +246,32 @@ CREATE TABLE audit_calls (
 
 The DB runs in WAL mode, so you can `sqlite3 audit.db` and run arbitrary
 queries while the logger is live.
+
+## Prometheus metrics
+
+The proxy can expose a Prometheus-compatible `/metrics` endpoint synthesized
+from the audit DB on each scrape. No `prometheus_client` dep required — the
+DB is the source of truth, so the metrics survive restarts and never drift.
+
+```bash
+AUDIT_ENABLE_METRICS=true mcp-audit-logger
+# scrape:
+curl http://127.0.0.1:8765/metrics
+```
+
+Series exposed:
+
+| Series                                                  | Type    | Labels                  |
+| ------------------------------------------------------- | ------- | ----------------------- |
+| `mcp_audit_calls_total`                                 | counter | `tool`, `success`       |
+| `mcp_audit_call_duration_seconds`                       | summary | `tool`, `quantile`      |
+| `mcp_audit_call_duration_seconds_sum`                   |         | `tool`                  |
+| `mcp_audit_call_duration_seconds_count`                 |         | `tool`                  |
+| `mcp_audit_db_size_bytes`                               | gauge   | _(none)_                |
+
+If `AUDIT_HTTP_TOKEN` is set, the metrics endpoint is gated by the same bearer
+token as `/mcp`. If you need un-authed scraping, terminate auth in a reverse
+proxy in front of the logger.
 
 ## Bearer auth
 

@@ -200,3 +200,34 @@ def test_config_retention_days_from_file(tmp_path: Path) -> None:
     p.write_text(json.dumps({"retention_days": 7}))
     cfg = load_config(p)
     assert cfg.retention_days == 7
+
+
+def test_config_metrics_default_disabled() -> None:
+    cfg = load_config()
+    assert cfg.enable_metrics is False
+    assert cfg.metrics_path == "/metrics"
+
+
+def test_config_metrics_enabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_ENABLE_METRICS", "true")
+    monkeypatch.setenv("AUDIT_METRICS_PATH", "/observability/metrics")
+    cfg = load_config()
+    assert cfg.enable_metrics is True
+    assert cfg.metrics_path == "/observability/metrics"
+
+
+def test_config_metrics_enabled_via_file(tmp_path: Path) -> None:
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({"enable_metrics": True, "metrics_path": "/m"}))
+    cfg = load_config(p)
+    assert cfg.enable_metrics is True
+    assert cfg.metrics_path == "/m"
+
+
+def test_config_metrics_env_truthy_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    for truthy in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("AUDIT_ENABLE_METRICS", truthy)
+        assert load_config().enable_metrics is True
+    for falsy in ("0", "false", "no", "off"):
+        monkeypatch.setenv("AUDIT_ENABLE_METRICS", falsy)
+        assert load_config().enable_metrics is False
