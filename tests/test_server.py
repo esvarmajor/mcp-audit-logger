@@ -228,6 +228,45 @@ async def test_audit_purge_real(server: Server, store: AuditStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_proxied_call_records_client_info_from_contextvar(
+    store: AuditStore,
+) -> None:
+    """A value set in client_info_var before _proxied_call runs should land on the row."""
+    import json as _json
+    import time as _time
+
+    from mcp_audit_logger.context import client_info_var
+    from mcp_audit_logger.server import _proxied_call
+
+    class _OkProxy:
+        target_label = "stub:in-process"
+
+        async def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
+            class _R:
+                content: list[Any] = []
+                isError = False  # noqa: N815 — mirrors the MCP CallToolResult attr
+                def model_dump(self, mode: str = "json") -> dict[str, Any]:
+                    return {"content": [], "isError": False}
+            return _R()
+
+    # Set the contextvar to an opaque JSON snippet, then run a proxied call.
+    info = _json.dumps({"ip": "10.0.0.5", "ua": "test-agent/1"})
+    tok = client_info_var.set(info)
+    try:
+        result = await _proxied_call(_OkProxy(), store, "fetch", {"url": "x"})
+        assert result.isError is False
+    finally:
+        client_info_var.reset(tok)
+
+    # We can't read client_info via the audit_get_recent_calls JSON shape because
+    # _row_to_dict doesn't decode it; instead pull directly from the store.
+    rows = store.recent(1)
+    assert rows[0]["client_info"] == info
+    # Lint-only use of the imports:
+    assert _time.time() > 0
+
+
+@pytest.mark.asyncio
 async def test_audit_get_slowest_calls(server: Server, store: AuditStore) -> None:
     import time
     t = time.time()

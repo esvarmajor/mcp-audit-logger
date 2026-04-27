@@ -50,6 +50,9 @@ independent of any individual server's logging. This project is that record.
   ingestion pipeline (Vector, Loki, Datadog, etc.).
 - **Bounded payload storage.** Large request/response payloads are truncated
   with a head snippet preserved, so the DB stays predictable.
+- **Per-call client info.** Each row records the client IP, user-agent, and
+  whether bearer auth was in use — handy for incident forensics across
+  multiple consumers.
 
 ## Requirements
 
@@ -203,7 +206,7 @@ A call record looks like:
   "response": { "content": [{ "type": "text", "text": "..." }], "isError": false },
   "success": true,
   "error": null,
-  "client_info": null,
+  "client_info": "{\"ip\":\"127.0.0.1\",\"ua\":\"claude-desktop/0.1.234\",\"auth\":\"bearer\"}",
   "downstream_target": "stdio:python -m mcp_server_fetch"
 }
 ```

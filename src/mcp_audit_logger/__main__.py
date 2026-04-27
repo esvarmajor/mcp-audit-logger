@@ -28,6 +28,7 @@ from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
 from .config import Config, load_config
+from .context import build_client_info_from_scope, client_info_var
 from .logging_config import configure_logging
 from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
 from .metrics import render as render_metrics
@@ -68,6 +69,32 @@ def _auth_wrap(
         await inner(scope, receive, send)
 
     return _handler
+
+
+def _capture_client_info(
+    inner: Callable[[Scope, Receive, Send], Any],
+    *,
+    has_token: bool,
+) -> Callable[[Scope, Receive, Send], Any]:
+    """Wrap `inner` with a layer that sets `client_info_var` for the request.
+
+    The ContextVar is reset in a `finally` so the value never leaks into a
+    sibling task. Non-HTTP scopes (e.g. lifespan messages) are passed through
+    untouched.
+    """
+
+    async def _wrapped(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await inner(scope, receive, send)
+            return
+        info = build_client_info_from_scope(scope, has_token=has_token)
+        token = client_info_var.set(info)
+        try:
+            await inner(scope, receive, send)
+        finally:
+            client_info_var.reset(token)
+
+    return _wrapped
 
 
 def _make_metrics_handler(store: AuditStore) -> Callable[[Scope, Receive, Send], Any]:
@@ -163,7 +190,12 @@ async def _run(cfg: Config) -> None:
     if expected_token:
         log.info("auth.bearer_token_enabled")
 
-    handle_mcp = _auth_wrap(expected_token, session_mgr.handle_request)
+    handle_mcp = _auth_wrap(
+        expected_token,
+        _capture_client_info(
+            session_mgr.handle_request, has_token=expected_token is not None
+        ),
+    )
 
     async def _retention_loop(store: AuditStore, retention_days: int) -> None:
         """Delete rows older than `retention_days` once per hour, forever."""

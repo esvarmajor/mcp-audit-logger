@@ -24,6 +24,7 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from pydantic import BaseModel, Field, ValidationError
 
+from .context import client_info_var
 from .proxy import DownstreamProxy
 from .storage import AuditStore
 
@@ -322,6 +323,7 @@ async def _proxied_call(
                 response=response_payload,
                 success=success,
                 error=error,
+                client_info=client_info_var.get(),
                 downstream_target=proxy.target_label,
             )
         except Exception:
