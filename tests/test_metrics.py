@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mcp_audit_logger.__main__ import _auth_wrap, _make_metrics_handler
+from mcp_audit_logger.__main__ import _make_metrics_endpoint
 from mcp_audit_logger.metrics import CONTENT_TYPE, render
 from mcp_audit_logger.storage import AuditStore
 
@@ -96,8 +96,8 @@ def test_render_empty_store(tmp_path: Path) -> None:
 
 def _client(store: AuditStore, token: str | None = None) -> TestClient:
     expected = f"Bearer {token}" if token else None
-    handler = _auth_wrap(expected, _make_metrics_handler(store))
-    app = Starlette(routes=[Mount("/metrics", app=handler)])
+    endpoint = _make_metrics_endpoint(store, expected_token=expected)
+    app = Starlette(routes=[Route("/metrics", endpoint, methods=["GET", "HEAD"])])
     return TestClient(app, raise_server_exceptions=True)
 
 

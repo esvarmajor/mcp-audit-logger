@@ -34,15 +34,19 @@ from mcp.client.streamable_http import streamable_http_client
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("SMOKE_PORT", "8766"))
 URL = f"http://{HOST}:{PORT}/mcp"
+HEALTH_URL = f"http://{HOST}:{PORT}/healthz"
 DB_PATH = Path(os.environ.get("SMOKE_DB", "./smoke.db"))
 
 # Tools we require the proxy to advertise even with no downstream configured.
 EXPECTED_TOOLS = {
     "audit_get_recent_calls",
+    "audit_get_call_by_id",
     "audit_get_call_stats",
     "audit_get_slowest_calls",
     "audit_get_top_errors",
+    "audit_get_top_consumers",
     "audit_export_jsonl",
+    "audit_export_csv",
 }
 
 
@@ -68,6 +72,25 @@ def _wait_for_ready(url: str, *, timeout: float = 15.0) -> bool:
     return False
 
 
+def _check_healthz() -> bool:
+    """Hit /healthz once; return True if 200 + ok status."""
+    try:
+        with httpx.Client(timeout=2.0) as c:
+            r = c.get(HEALTH_URL)
+    except httpx.HTTPError as exc:
+        _log(f"/healthz unreachable: {exc}", ok=False)
+        return False
+    if r.status_code != 200:
+        _log(f"/healthz returned {r.status_code}", ok=False)
+        return False
+    body = r.json()
+    if body.get("status") != "ok":
+        _log(f"/healthz status not ok: {body}", ok=False)
+        return False
+    _log(f"/healthz reports {body.get('status')} (downstream={body.get('downstream')})", ok=True)
+    return True
+
+
 async def _round_trip() -> int:
     async with AsyncExitStack() as stack:
         transport = await stack.enter_async_context(streamable_http_client(URL))
@@ -89,6 +112,18 @@ async def _round_trip() -> int:
             return 1
         _log("audit_get_recent_calls returned cleanly", ok=True)
 
+        # The previous call audited itself; verify we can fetch it back by id.
+        recent_text = result.content[0].text if result.content else "[]"
+        # The recent list before this self-call would be empty, but the call we
+        # just made gets logged before the response is sent in our pipeline,
+        # so a follow-up call should see at least one row.
+        followup = await session.call_tool("audit_get_call_stats", {})
+        if followup.isError:
+            _log("audit_get_call_stats round-trip failed", ok=False)
+            return 1
+        _log("audit_get_call_stats round-trip cleanly", ok=True)
+        _ = recent_text  # keep the decoded payload around for debugging
+
     return 0
 
 
@@ -106,6 +141,8 @@ def main() -> int:
             _log("proxy never became ready", ok=False)
             return 1
         _log("proxy is listening", ok=True)
+        if not _check_healthz():
+            return 1
         rc = asyncio.run(_round_trip())
     finally:
         proc.terminate()

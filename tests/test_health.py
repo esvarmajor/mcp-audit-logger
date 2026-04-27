@@ -8,10 +8,10 @@ from typing import Any
 
 import pytest
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from mcp_audit_logger.__main__ import _make_health_handler
+from mcp_audit_logger.__main__ import _make_health_endpoint
 from mcp_audit_logger.storage import AuditStore
 
 
@@ -21,7 +21,9 @@ def store(tmp_path: Path) -> AuditStore:
 
 
 def _client(store: AuditStore, proxy: Any = None) -> TestClient:
-    app = Starlette(routes=[Mount("/healthz", app=_make_health_handler(store, proxy))])
+    app = Starlette(routes=[
+        Route("/healthz", _make_health_endpoint(store, proxy), methods=["GET", "HEAD"])
+    ])
     return TestClient(app, raise_server_exceptions=True)
 
 
