@@ -91,6 +91,27 @@ async def test_list_tools_returns_audit_tools(server: Server) -> None:
 
 
 @pytest.mark.asyncio
+async def test_audit_get_call_by_id_hit(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    rid = store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={"url": "x"}, response={"ok": True},
+        success=True, error=None,
+    )
+    result = await _call(server, "audit_get_call_by_id", {"call_id": rid})
+    data = json.loads(result.content[0].text)
+    assert data["id"] == rid
+    assert data["tool_name"] == "fetch"
+
+
+@pytest.mark.asyncio
+async def test_audit_get_call_by_id_miss(server: Server) -> None:
+    result = await _call(server, "audit_get_call_by_id", {"call_id": 12345})
+    assert "No audit row with id=12345" in result.content[0].text
+
+
+@pytest.mark.asyncio
 async def test_audit_get_recent_calls_empty(server: Server) -> None:
     result = await _call(server, "audit_get_recent_calls", {})
     assert result.isError is not True
@@ -183,6 +204,22 @@ async def test_audit_search_arguments(server: Server, store: AuditStore) -> None
 
 
 @pytest.mark.asyncio
+async def test_audit_export_csv_has_header(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={"url": "x"}, response={"ok": True},
+        success=True, error=None,
+    )
+    result = await _call(server, "audit_export_csv", {"limit": 10, "since_id": 0})
+    text = result.content[0].text
+    lines = text.strip().splitlines()
+    assert lines[0].startswith("id,ts_start,ts_end")
+    assert len(lines) == 2  # header + 1 row
+
+
+@pytest.mark.asyncio
 async def test_audit_export_jsonl(server: Server, store: AuditStore) -> None:
     import time
     t = time.time()
@@ -225,6 +262,183 @@ async def test_audit_purge_real(server: Server, store: AuditStore) -> None:
     out = json.loads(result.content[0].text)
     assert out["rows_affected"] == 1
     assert len(store.recent(10)) == 0
+
+
+@pytest.mark.asyncio
+async def test_proxied_call_records_client_info_from_contextvar(
+    store: AuditStore,
+) -> None:
+    """A value set in client_info_var before _proxied_call runs should land on the row."""
+    import json as _json
+    import time as _time
+
+    from mcp_audit_logger.context import client_info_var
+    from mcp_audit_logger.server import _proxied_call
+
+    class _OkProxy:
+        target_label = "stub:in-process"
+
+        async def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
+            class _R:
+                content: list[Any] = []
+                isError = False  # noqa: N815 — mirrors the MCP CallToolResult attr
+                def model_dump(self, mode: str = "json") -> dict[str, Any]:
+                    return {"content": [], "isError": False}
+            return _R()
+
+    # Set the contextvar to an opaque JSON snippet, then run a proxied call.
+    info = _json.dumps({"ip": "10.0.0.5", "ua": "test-agent/1"})
+    tok = client_info_var.set(info)
+    try:
+        result = await _proxied_call(_OkProxy(), store, "fetch", {"url": "x"})
+        assert result.isError is False
+    finally:
+        client_info_var.reset(tok)
+
+    # We can't read client_info via the audit_get_recent_calls JSON shape because
+    # _row_to_dict doesn't decode it; instead pull directly from the store.
+    rows = store.recent(1)
+    assert rows[0]["client_info"] == info
+    # Lint-only use of the imports:
+    assert _time.time() > 0
+
+
+@pytest.mark.asyncio
+async def test_audit_get_slowest_calls(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.01, tool_name="fast",
+        arguments={}, response={}, success=True, error=None,
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 5.0, tool_name="slow",
+        arguments={}, response={}, success=True, error=None,
+    )
+    result = await _call(server, "audit_get_slowest_calls", {"limit": 5})
+    data = json.loads(result.content[0].text)
+    assert data[0]["tool_name"] == "slow"
+    assert data[1]["tool_name"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_audit_get_top_errors(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for _ in range(3):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=False, error="timeout",
+        )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=False, error="dns_error",
+    )
+    result = await _call(server, "audit_get_top_errors", {"limit": 5})
+    data = json.loads(result.content[0].text)
+    assert data[0]["error"] == "timeout"
+    assert data[0]["occurrences"] == 3
+
+
+@pytest.mark.asyncio
+async def test_audit_get_calls_by_client(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for ip in ("1.1.1.1", "1.1.1.1", "2.2.2.2"):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+            client_info=f'{{"ip":"{ip}"}}',
+        )
+    result = await _call(
+        server, "audit_get_calls_by_client", {"client_pattern": "%1.1.1.1%"}
+    )
+    data = json.loads(result.content[0].text)
+    assert len(data) == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_get_top_consumers(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for _ in range(2):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+            client_info='{"ip":"1.1.1.1"}',
+        )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+        client_info='{"ip":"2.2.2.2"}',
+    )
+    result = await _call(server, "audit_get_top_consumers", {"limit": 10})
+    data = json.loads(result.content[0].text)
+    assert data[0]["client_info"] == '{"ip":"1.1.1.1"}'
+    assert data[0]["call_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_vacuum_returns_size_report(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+    )
+    result = await _call(server, "audit_vacuum", {})
+    out = json.loads(result.content[0].text)
+    assert "size_bytes_before" in out
+    assert "size_bytes_after" in out
+    assert "reclaimed_bytes" in out
+    assert out["reclaimed_bytes"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_audit_count_returns_total(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for _ in range(3):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+        )
+    result = await _call(server, "audit_count", {})
+    assert json.loads(result.content[0].text) == {"count": 3}
+
+
+@pytest.mark.asyncio
+async def test_audit_count_with_filters(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=False, error="x",
+    )
+    result = await _call(server, "audit_count", {"tool_name": "fetch", "success": False})
+    assert json.loads(result.content[0].text) == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_audit_get_recent_failures(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t - 5000, ts_end=t - 4999, tool_name="old_fail",
+        arguments={}, response={}, success=False, error="old",
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fresh_fail",
+        arguments={}, response={}, success=False, error="fresh",
+    )
+    result = await _call(server, "audit_get_recent_failures", {"window_seconds": 60})
+    data = json.loads(result.content[0].text)
+    assert len(data) == 1
+    assert data[0]["tool_name"] == "fresh_fail"
 
 
 @pytest.mark.asyncio

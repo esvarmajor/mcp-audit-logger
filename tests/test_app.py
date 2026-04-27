@@ -200,3 +200,56 @@ def test_config_retention_days_from_file(tmp_path: Path) -> None:
     p.write_text(json.dumps({"retention_days": 7}))
     cfg = load_config(p)
     assert cfg.retention_days == 7
+
+
+def test_config_metrics_default_disabled() -> None:
+    cfg = load_config()
+    assert cfg.enable_metrics is False
+    assert cfg.metrics_path == "/metrics"
+
+
+def test_config_metrics_enabled_via_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_ENABLE_METRICS", "true")
+    monkeypatch.setenv("AUDIT_METRICS_PATH", "/observability/metrics")
+    cfg = load_config()
+    assert cfg.enable_metrics is True
+    assert cfg.metrics_path == "/observability/metrics"
+
+
+def test_config_metrics_enabled_via_file(tmp_path: Path) -> None:
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({"enable_metrics": True, "metrics_path": "/m"}))
+    cfg = load_config(p)
+    assert cfg.enable_metrics is True
+    assert cfg.metrics_path == "/m"
+
+
+def test_main_check_mode_does_not_start_server(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--check should print a config summary and return without booting."""
+    from mcp_audit_logger.__main__ import main
+
+    monkeypatch.setattr("sys.argv", ["mcp-audit-logger", "--check"])
+    main()  # Should not raise; should not block.
+    captured = capsys.readouterr()
+    assert "config OK" in captured.out
+    assert "host=" in captured.out
+
+
+def test_config_health_path_default() -> None:
+    assert load_config().health_path == "/healthz"
+
+
+def test_config_health_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_HEALTH_PATH", "/livez")
+    assert load_config().health_path == "/livez"
+
+
+def test_config_metrics_env_truthy_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    for truthy in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("AUDIT_ENABLE_METRICS", truthy)
+        assert load_config().enable_metrics is True
+    for falsy in ("0", "false", "no", "off"):
+        monkeypatch.setenv("AUDIT_ENABLE_METRICS", falsy)
+        assert load_config().enable_metrics is False

@@ -3,7 +3,7 @@
 from .config import Config, DownstreamHttp, DownstreamStdio, load_config
 from .storage import AuditStore
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "AuditStore",
     "Config",
