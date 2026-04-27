@@ -316,6 +316,10 @@ python scripts/smoke.py        # exit 0 on success
 SMOKE_PORT=8800 ./scripts/smoke.sh  # alternate port via wrapper
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

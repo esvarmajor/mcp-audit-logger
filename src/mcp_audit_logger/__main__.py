@@ -27,6 +27,7 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
+from . import __version__
 from .config import Config, load_config
 from .context import build_client_info_from_scope, client_info_var
 from .logging_config import configure_logging
@@ -131,6 +132,11 @@ def _parse_args() -> argparse.Namespace:
             "A transparent MCP middleware proxy that audits every tool call "
             "to a local SQLite database."
         ),
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"mcp-audit-logger {__version__}",
     )
     p.add_argument("--config", help="Path to JSON config file (overrides env).")
     p.add_argument("--host", help="Host to bind (default 127.0.0.1).")

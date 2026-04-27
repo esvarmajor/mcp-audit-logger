@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-audit-logger"
-version = "0.1.0"
+version = "0.2.0"
 description = "A transparent middleware MCP proxy that audits every tool call to a local SQLite database."
 readme = "README.md"
 license = { text = "MIT" }
