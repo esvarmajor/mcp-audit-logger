@@ -65,6 +65,14 @@ class _ExportArgs(BaseModel):
     since_id: int = Field(default=0, ge=0, description="Only export rows with id > this value.")
 
 
+class _SlowestArgs(BaseModel):
+    limit: int = Field(default=20, ge=1, le=1000)
+
+
+class _TopErrorsArgs(BaseModel):
+    limit: int = Field(default=20, ge=1, le=1000)
+
+
 class _PurgeArgs(BaseModel):
     before_ts: float = Field(
         description="Delete all rows whose ts_start is strictly before this Unix timestamp."
@@ -125,6 +133,22 @@ AUDIT_TOOLS: list[types.Tool] = [
             "Useful for piping into analysis tools."
         ),
         inputSchema=_ExportArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_get_slowest_calls",
+        description=(
+            "Return the N slowest tool calls overall (longest duration first). "
+            "Useful for finding pathological invocations or downstream regressions."
+        ),
+        inputSchema=_SlowestArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_get_top_errors",
+        description=(
+            "Group failed calls by (tool_name, error) and return the most "
+            "frequent. Each row reports occurrences and last_seen (Unix ts)."
+        ),
+        inputSchema=_TopErrorsArgs.model_json_schema(),
     ),
     types.Tool(
         name="audit_purge",
@@ -221,6 +245,12 @@ def _run_audit_tool(
     elif name == "audit_search_arguments":
         a5 = _SearchArgsModel.model_validate(arguments)
         out = store.search_arguments(pattern=a5.pattern, limit=a5.limit)
+    elif name == "audit_get_slowest_calls":
+        a_slow = _SlowestArgs.model_validate(arguments)
+        out = store.slowest(limit=a_slow.limit)
+    elif name == "audit_get_top_errors":
+        a_top = _TopErrorsArgs.model_validate(arguments)
+        out = store.top_errors(limit=a_top.limit)
     elif name == "audit_export_jsonl":
         a6 = _ExportArgs.model_validate(arguments)
         rows = store.export(limit=a6.limit, since_id=a6.since_id)

@@ -176,6 +176,67 @@ def test_purge_dry_run_does_not_delete(store: AuditStore) -> None:
     assert len(store.recent(10)) == 1  # still there
 
 
+def test_stats_includes_percentiles(store: AuditStore) -> None:
+    for d in (0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 1.00):
+        _insert(store, tool="fetch", duration_s=d)
+    stats = {row["tool_name"]: row for row in store.stats()}
+    f = stats["fetch"]
+    assert f["call_count"] == 10
+    # p50 of 10 sorted values via linear interp lands between 5th and 6th elements
+    # sorted ms = [50, 100, 200, 300, 400, 500, 600, 700, 800, 1000]
+    # rank for p50 = 4.5 → 400 + 0.5*(500-400) = 450
+    assert f["p50_duration_ms"] == pytest.approx(450.0, rel=0.05)
+    # rank for p95 = 8.55 → 800 + 0.55*(1000-800) = 910
+    assert f["p95_duration_ms"] == pytest.approx(910.0, rel=0.05)
+
+
+def test_stats_empty_returns_empty_list(store: AuditStore) -> None:
+    assert store.stats() == []
+
+
+def test_slowest_orders_by_duration_desc(store: AuditStore) -> None:
+    _insert(store, tool="fast", duration_s=0.01)
+    _insert(store, tool="medium", duration_s=0.5)
+    _insert(store, tool="slow", duration_s=5.0)
+    rows = store.slowest(limit=10)
+    assert [r["tool_name"] for r in rows] == ["slow", "medium", "fast"]
+
+
+def test_slowest_respects_limit(store: AuditStore) -> None:
+    for i in range(10):
+        _insert(store, tool=f"t{i}", duration_s=i / 10)
+    rows = store.slowest(limit=3)
+    assert len(rows) == 3
+    # Slowest first
+    assert rows[0]["duration_ms"] >= rows[1]["duration_ms"] >= rows[2]["duration_ms"]
+
+
+def test_top_errors_groups_and_counts(store: AuditStore) -> None:
+    _insert(store, tool="fetch", success=False, error="timeout")
+    _insert(store, tool="fetch", success=False, error="timeout")
+    _insert(store, tool="fetch", success=False, error="dns_error")
+    _insert(store, tool="search", success=False, error="timeout")
+    _insert(store, tool="ok_call", success=True)  # success, not in result
+
+    rows = store.top_errors(limit=10)
+    # Five total, but successes excluded → 4 failures across 3 distinct (tool, error)
+    by_key = {(r["tool_name"], r["error"]): r for r in rows}
+    assert by_key[("fetch", "timeout")]["occurrences"] == 2
+    assert by_key[("fetch", "dns_error")]["occurrences"] == 1
+    assert by_key[("search", "timeout")]["occurrences"] == 1
+    # Most frequent first
+    assert rows[0]["occurrences"] == 2
+
+
+def test_top_errors_excludes_null_errors(store: AuditStore) -> None:
+    # success=False but error=None → excluded (sentinel-row guard).
+    _insert(store, tool="fetch", success=False, error=None)
+    _insert(store, tool="fetch", success=False, error="real_error")
+    rows = store.top_errors()
+    assert len(rows) == 1
+    assert rows[0]["error"] == "real_error"
+
+
 def test_purge_actually_deletes(store: AuditStore) -> None:
     t = time.time()
     store.log_call(

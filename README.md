@@ -32,12 +32,14 @@ independent of any individual server's logging. This project is that record.
   to know the logger is there.
 - **Full audit trail in SQLite.** One row per tool call. No external DB, no
   Kafka, nothing to operate.
-- **Eight query/management tools for agents.** An agent connected through the
+- **Ten query/management tools for agents.** An agent connected through the
   logger can introspect and manage its own call history:
     - `audit_get_recent_calls` — newest N calls
     - `audit_get_calls_by_tool` — filter by tool name
     - `audit_get_failed_calls` — only errored calls
-    - `audit_get_call_stats` — per-tool aggregate metrics
+    - `audit_get_call_stats` — per-tool aggregate metrics (count, avg/min/max/p50/p95, error rate)
+    - `audit_get_slowest_calls` — N slowest calls overall, longest first
+    - `audit_get_top_errors` — most frequent (tool, error) groupings
     - `audit_get_calls_in_range` — time-bounded slice
     - `audit_search_arguments` — SQL LIKE search over argument JSON
     - `audit_export_jsonl` — export as JSONL for offline analysis
@@ -178,6 +180,8 @@ offline analysis.
 | `audit_get_calls_by_tool`   | `{ "tool_name": "...", "limit": 50 }`                    | Newest-first array filtered by name.     |
 | `audit_get_failed_calls`    | `{ "limit": 50 }`                                        | Newest-first array of `success = false`. |
 | `audit_get_call_stats`      | `{}`                                                     | Per-tool aggregates (see below).         |
+| `audit_get_slowest_calls`   | `{ "limit": 20 }`                                        | Slowest-first array of call records.     |
+| `audit_get_top_errors`      | `{ "limit": 20 }`                                        | `(tool, error)` groups with occurrences. |
 | `audit_get_calls_in_range`  | `{ "start_ts": 1713600000, "end_ts": 1713700000 }`       | Calls in the given Unix-ts window.       |
 | `audit_search_arguments`    | `{ "pattern": "%example.com%", "limit": 50 }`            | Calls whose arguments match the pattern. |
 | `audit_export_jsonl`        | `{ "limit": 500, "since_id": 0 }`                        | JSONL text, one record per line.         |
@@ -211,6 +215,8 @@ A call record looks like:
     "avg_duration_ms": 284.1,
     "min_duration_ms": 41.0,
     "max_duration_ms": 3120.0,
+    "p50_duration_ms": 240.0,
+    "p95_duration_ms": 1190.0,
     "error_count": 3,
     "error_rate": 0.0211
   }

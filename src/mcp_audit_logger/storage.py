@@ -21,6 +21,23 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+
+def _percentile_sorted(sorted_values: list[float], pct: float) -> float | None:
+    """Linear-interpolated percentile of a pre-sorted, non-empty sequence.
+
+    Returns None for an empty input. `pct` is a number in [0, 100].
+    """
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    rank = (pct / 100.0) * (len(sorted_values) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = rank - lo
+    return float(sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac)
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_calls (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -175,9 +192,14 @@ class AuditStore:
         return [self._row_to_dict(r) for r in rows]
 
     def stats(self) -> list[dict[str, Any]]:
-        """Per-tool aggregate stats, ordered by call count desc."""
+        """Per-tool aggregate stats, ordered by call count desc.
+
+        Returns count, error count/rate, and a duration distribution
+        (avg, min, max, p50, p95). Percentiles are computed in Python
+        because SQLite has no native percentile_cont().
+        """
         with self._conn() as c:
-            rows = c.execute(
+            agg_rows = c.execute(
                 """
                 SELECT tool_name,
                        COUNT(*)                                           AS call_count,
@@ -191,6 +213,54 @@ class AuditStore:
                 GROUP BY tool_name
                 ORDER BY call_count DESC
                 """
+            ).fetchall()
+            durations: dict[str, list[float]] = {}
+            if agg_rows:
+                for tool, dur in c.execute(
+                    "SELECT tool_name, duration_ms FROM audit_calls"
+                ).fetchall():
+                    durations.setdefault(tool, []).append(dur)
+
+        out: list[dict[str, Any]] = []
+        for r in agg_rows:
+            d = dict(r)
+            ds = sorted(durations.get(d["tool_name"], []))
+            d["p50_duration_ms"] = _percentile_sorted(ds, 50)
+            d["p95_duration_ms"] = _percentile_sorted(ds, 95)
+            out.append(d)
+        return out
+
+    def slowest(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the slowest N calls overall, longest duration first."""
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls ORDER BY duration_ms DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def top_errors(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Group failed calls by (tool_name, error) and return the most frequent.
+
+        Each entry includes occurrences, last_seen (Unix ts), and a sample
+        argument JSON from the most recent occurrence.
+        """
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT tool_name,
+                       error,
+                       COUNT(*)                AS occurrences,
+                       MAX(ts_start)           AS last_seen
+                FROM audit_calls
+                WHERE success = 0 AND error IS NOT NULL
+                GROUP BY tool_name, error
+                ORDER BY occurrences DESC, last_seen DESC
+                LIMIT ?
+                """,
+                (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
 

@@ -228,6 +228,43 @@ async def test_audit_purge_real(server: Server, store: AuditStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_audit_get_slowest_calls(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.01, tool_name="fast",
+        arguments={}, response={}, success=True, error=None,
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 5.0, tool_name="slow",
+        arguments={}, response={}, success=True, error=None,
+    )
+    result = await _call(server, "audit_get_slowest_calls", {"limit": 5})
+    data = json.loads(result.content[0].text)
+    assert data[0]["tool_name"] == "slow"
+    assert data[1]["tool_name"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_audit_get_top_errors(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for _ in range(3):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=False, error="timeout",
+        )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=False, error="dns_error",
+    )
+    result = await _call(server, "audit_get_top_errors", {"limit": 5})
+    data = json.loads(result.content[0].text)
+    assert data[0]["error"] == "timeout"
+    assert data[0]["occurrences"] == 3
+
+
+@pytest.mark.asyncio
 async def test_invalid_arguments_returns_error(server: Server) -> None:
     # limit must be ge=1; the SDK's jsonschema validation fires first
     result = await _call(server, "audit_get_recent_calls", {"limit": -5})
