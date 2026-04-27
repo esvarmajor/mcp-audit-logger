@@ -341,6 +341,23 @@ async def test_audit_get_top_errors(server: Server, store: AuditStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_audit_get_calls_by_client(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for ip in ("1.1.1.1", "1.1.1.1", "2.2.2.2"):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+            client_info=f'{{"ip":"{ip}"}}',
+        )
+    result = await _call(
+        server, "audit_get_calls_by_client", {"client_pattern": "%1.1.1.1%"}
+    )
+    data = json.loads(result.content[0].text)
+    assert len(data) == 2
+
+
+@pytest.mark.asyncio
 async def test_audit_get_top_consumers(server: Server, store: AuditStore) -> None:
     import time
     t = time.time()

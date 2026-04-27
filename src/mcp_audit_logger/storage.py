@@ -184,6 +184,26 @@ class AuditStore:
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def by_client(
+        self, *, client_pattern: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return calls whose client_info JSON matches a SQL LIKE pattern.
+
+        Companion to ``top_consumers``: once you've identified a noisy
+        client, this drills into its actual call history. Use ``%`` as
+        the wildcard — e.g. ``%10.0.0.5%`` to match all calls from a
+        specific IP regardless of UA, or ``%claude-desktop%`` to match
+        all calls from any Claude Desktop client.
+        """
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE client_info LIKE ? "
+                "ORDER BY id DESC LIMIT ?",
+                (client_pattern, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def by_tool(self, tool_name: str, limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 1000))
         with self._conn() as c:

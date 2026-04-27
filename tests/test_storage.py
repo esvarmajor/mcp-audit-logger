@@ -301,6 +301,24 @@ def test_top_errors_groups_and_counts(store: AuditStore) -> None:
     assert rows[0]["occurrences"] == 2
 
 
+def test_by_client_filters_by_client_info(store: AuditStore) -> None:
+    t = time.time()
+    for ip in ("10.0.0.1", "10.0.0.1", "10.0.0.2"):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+            client_info=f'{{"ip":"{ip}"}}',
+        )
+    rows = store.by_client(client_pattern="%10.0.0.1%")
+    assert len(rows) == 2
+    assert all("10.0.0.1" in (r["client_info"] or "") for r in rows)
+
+
+def test_by_client_no_match_returns_empty(store: AuditStore) -> None:
+    _insert(store)  # No client_info
+    assert store.by_client(client_pattern="%nope%") == []
+
+
 def test_top_consumers_groups_by_client_info(store: AuditStore) -> None:
     t = time.time()
     for _ in range(3):

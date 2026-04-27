@@ -32,11 +32,12 @@ independent of any individual server's logging. This project is that record.
   to know the logger is there.
 - **Full audit trail in SQLite.** One row per tool call. No external DB, no
   Kafka, nothing to operate.
-- **Fourteen query/management tools for agents.** An agent connected through the
+- **Fifteen query/management tools for agents.** An agent connected through the
   logger can introspect and manage its own call history:
     - `audit_get_recent_calls` — newest N calls
     - `audit_get_call_by_id` — fetch a single row for deep-dive debugging
     - `audit_get_calls_by_tool` — filter by tool name
+    - `audit_get_calls_by_client` — filter by client_info LIKE pattern
     - `audit_get_failed_calls` — only errored calls
     - `audit_get_call_stats` — per-tool aggregate metrics (count, avg/min/max/p50/p95, error rate)
     - `audit_get_slowest_calls` — N slowest calls overall, longest first

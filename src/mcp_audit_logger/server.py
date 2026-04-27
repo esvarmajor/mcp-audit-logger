@@ -47,6 +47,13 @@ class _ByToolArgs(BaseModel):
     limit: int = Field(default=50, ge=1, le=1000)
 
 
+class _ByClientArgs(BaseModel):
+    client_pattern: str = Field(
+        description="SQL LIKE pattern matched against client_info — e.g. %10.0.0.5%."
+    )
+    limit: int = Field(default=50, ge=1, le=1000)
+
+
 class _FailedArgs(BaseModel):
     limit: int = Field(default=50, ge=1, le=1000)
 
@@ -124,6 +131,16 @@ AUDIT_TOOLS: list[types.Tool] = [
         name="audit_get_calls_by_tool",
         description="Return the most recent N calls filtered to a specific tool name.",
         inputSchema=_ByToolArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_get_calls_by_client",
+        description=(
+            "Return the most recent N calls whose client_info matches a SQL LIKE "
+            "pattern. Drill-down companion to audit_get_top_consumers — once "
+            "you've identified a noisy IP or UA, this shows its actual history. "
+            'Pattern uses % as wildcard, e.g. "%10.0.0.5%".'
+        ),
+        inputSchema=_ByClientArgs.model_json_schema(),
     ),
     types.Tool(
         name="audit_get_failed_calls",
@@ -296,6 +313,9 @@ def _run_audit_tool(
     elif name == "audit_get_calls_by_tool":
         a2 = _ByToolArgs.model_validate(arguments)
         out = store.by_tool(tool_name=a2.tool_name, limit=a2.limit)
+    elif name == "audit_get_calls_by_client":
+        a_bc = _ByClientArgs.model_validate(arguments)
+        out = store.by_client(client_pattern=a_bc.client_pattern, limit=a_bc.limit)
     elif name == "audit_get_failed_calls":
         a3 = _FailedArgs.model_validate(arguments)
         out = store.failed(limit=a3.limit)
