@@ -224,6 +224,15 @@ def test_config_metrics_enabled_via_file(tmp_path: Path) -> None:
     assert cfg.metrics_path == "/m"
 
 
+def test_config_health_path_default() -> None:
+    assert load_config().health_path == "/healthz"
+
+
+def test_config_health_path_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUDIT_HEALTH_PATH", "/livez")
+    assert load_config().health_path == "/livez"
+
+
 def test_config_metrics_env_truthy_variants(monkeypatch: pytest.MonkeyPatch) -> None:
     for truthy in ("1", "true", "TRUE", "yes", "on"):
         monkeypatch.setenv("AUDIT_ENABLE_METRICS", truthy)

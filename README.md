@@ -164,6 +164,7 @@ CLI beats env beats file.
 | `retention_days`     | `AUDIT_RETENTION_DAYS`      | —                | _(none)_      |
 | `enable_metrics`     | `AUDIT_ENABLE_METRICS`      | —                | `false`       |
 | `metrics_path`       | `AUDIT_METRICS_PATH`        | —                | `/metrics`    |
+| `health_path`        | `AUDIT_HEALTH_PATH`         | —                | `/healthz`    |
 | `downstream.kind`    | (see below)                 | —                | —             |
 
 Downstream via env vars:
@@ -253,6 +254,18 @@ CREATE TABLE audit_calls (
 
 The DB runs in WAL mode, so you can `sqlite3 audit.db` and run arbitrary
 queries while the logger is live.
+
+## Health check
+
+The proxy always exposes a small JSON `/healthz` endpoint (path configurable
+via `AUDIT_HEALTH_PATH`). It returns 200 when the audit DB is writable and
+the downstream (if configured) has a live session — 503 otherwise. Suitable
+for k8s liveness/readiness probes. Never gated by bearer auth.
+
+```bash
+$ curl http://127.0.0.1:8765/healthz
+{"status":"ok","db_writable":true,"downstream":"connected","version":"0.2.0"}
+```
 
 ## Prometheus metrics
 

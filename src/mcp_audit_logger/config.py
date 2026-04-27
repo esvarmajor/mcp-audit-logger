@@ -80,6 +80,10 @@ class Config:
     enable_metrics: bool = False
     metrics_path: str = "/metrics"
 
+    # Health-check endpoint. Always on, never auth-gated. Suitable for
+    # k8s liveness/readiness probes.
+    health_path: str = "/healthz"
+
 
 @overload
 def _env(name: str, default: str) -> str: ...
@@ -148,6 +152,11 @@ def load_config(config_path: str | Path | None = None) -> Config:
         cfg.metrics_path = str(cfg_data["metrics_path"])
     if (v := _env("AUDIT_METRICS_PATH")):
         cfg.metrics_path = v
+
+    if "health_path" in cfg_data:
+        cfg.health_path = str(cfg_data["health_path"])
+    if (v := _env("AUDIT_HEALTH_PATH")):
+        cfg.health_path = v
 
     downstream_data = cfg_data.get("downstream") or _load_downstream_from_env()
     if downstream_data:

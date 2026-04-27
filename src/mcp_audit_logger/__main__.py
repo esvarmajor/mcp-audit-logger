@@ -98,6 +98,67 @@ def _capture_client_info(
     return _wrapped
 
 
+def _make_health_handler(
+    store: AuditStore,
+    proxy: DownstreamProxy | None,
+) -> Callable[[Scope, Receive, Send], Any]:
+    """Return an ASGI callable for /healthz.
+
+    Reports liveness (the process is up) and readiness (the audit DB is
+    writable and, if a downstream is configured, the proxy session is
+    initialised). Designed for k8s-style probes — small, fast, and
+    intentionally NOT gated by bearer auth.
+    """
+    import json as _json
+
+    async def _health(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("method", "GET") not in ("GET", "HEAD"):
+            await send({
+                "type": "http.response.start",
+                "status": 405,
+                "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
+            })
+            await send({"type": "http.response.body", "body": b"Method Not Allowed"})
+            return
+
+        db_ok = True
+        try:
+            store.db_size_bytes()
+        except Exception:
+            db_ok = False
+
+        # not_configured → None; configured → True/False based on session presence.
+        downstream_ok: bool | None = (
+            None if proxy is None else proxy._session is not None
+        )
+
+        ready = db_ok and (downstream_ok is not False)
+        status = 200 if ready else 503
+        body = _json.dumps(
+            {
+                "status": "ok" if ready else "degraded",
+                "db_writable": db_ok,
+                "downstream": (
+                    "connected"
+                    if downstream_ok is True
+                    else "disconnected"
+                    if downstream_ok is False
+                    else "not_configured"
+                ),
+                "version": __version__,
+            }
+        ).encode("utf-8")
+
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [[b"content-type", b"application/json"]],
+        })
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    return _health
+
+
 def _make_metrics_handler(store: AuditStore) -> Callable[[Scope, Receive, Send], Any]:
     """Return an ASGI callable that emits Prometheus text exposition for `store`."""
     body_type = METRICS_CONTENT_TYPE.encode("utf-8")
@@ -251,7 +312,11 @@ async def _run(cfg: Config) -> None:
                     await proxy.stop()
                 log.info("server.stopped")
 
-    routes = [Mount(cfg.mount_path, app=handle_mcp)]
+    routes = [
+        Mount(cfg.mount_path, app=handle_mcp),
+        # Health check is always on and never gated by auth.
+        Mount(cfg.health_path, app=_make_health_handler(store, proxy)),
+    ]
     if cfg.enable_metrics:
         metrics_handler = _auth_wrap(expected_token, _make_metrics_handler(store))
         routes.append(Mount(cfg.metrics_path, app=metrics_handler))
