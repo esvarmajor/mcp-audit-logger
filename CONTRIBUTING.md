@@ -39,6 +39,17 @@ make smoke        # boots the proxy and round-trips an MCP call
 - Default to fewer lines, fewer abstractions. The whole point of this
   project is that it's small.
 
+## Pre-commit
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+Hooks run trailing-whitespace, end-of-file-fixer, ruff, ruff-format,
+and mypy on every commit. CI re-runs the same checks via `make ci`,
+so failures here = failures there.
+
 ## Tests
 
 - Unit tests live alongside their target module under `tests/`. We use
