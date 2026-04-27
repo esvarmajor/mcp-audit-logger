@@ -4,6 +4,32 @@ All notable changes to `mcp-audit-logger` are recorded here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `audit_get_calls_by_client` tool — drill-down companion to
+  `audit_get_top_consumers`.
+- `audit_get_call_by_id` tool — single-row lookup by primary key.
+- `audit_export_csv` tool — CSV export companion to JSONL export.
+- Always-on `/healthz` JSON endpoint for k8s probes.
+- `Dockerfile` (multi-stage, non-root, with `HEALTHCHECK`) and
+  `.dockerignore`.
+- `Makefile` with `install / test / lint / type / fmt / smoke / run /
+  ci / clean`.
+- `py.typed` marker — package now ships PEP 561 type information.
+- `CONTRIBUTING.md`, `.editorconfig`, GitHub issue + PR templates.
+
+### Changed
+
+- `/healthz` and `/metrics` switched from Mount to Starlette `Route` so
+  bare paths (no trailing slash) no longer return a 307 redirect.
+- Smoke script now checks `/healthz`, the full v0.2.0 tool inventory,
+  and round-trips `audit_get_call_stats` in addition to
+  `audit_get_recent_calls`.
+- `mypy` config tightened (`warn_unused_ignores`, `check_untyped_defs`,
+  `no_implicit_optional`, `warn_redundant_casts`).
+
 ## [0.2.0] — 2026-04-26
 
 ### Added
