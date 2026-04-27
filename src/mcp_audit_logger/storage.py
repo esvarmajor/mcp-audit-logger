@@ -295,6 +295,48 @@ class AuditStore:
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def top_consumers(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Group calls by client_info and return the top N callers.
+
+        Useful when multiple agents/clients share one proxy — surfaces who
+        is generating the most traffic, with a per-client error rate.
+        Rows with NULL client_info (e.g. older entries) are bucketed under
+        a synthetic ``"(no client info)"`` key.
+        """
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT
+                    COALESCE(client_info, '(no client info)') AS client_info,
+                    COUNT(*)                                   AS call_count,
+                    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS error_count,
+                    CAST(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS REAL)
+                        / COUNT(*)                             AS error_rate,
+                    MAX(ts_start)                              AS last_seen
+                FROM audit_calls
+                GROUP BY client_info
+                ORDER BY call_count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def vacuum(self) -> None:
+        """Run SQLite VACUUM to reclaim disk space after a large purge.
+
+        Cannot run inside a transaction. We open a fresh connection without
+        the WAL-shared write lock so concurrent reads still work; VACUUM
+        itself blocks writes for its duration, which is unavoidable.
+        """
+        with self._lock:
+            conn = sqlite3.connect(str(self._db_path), timeout=60.0, isolation_level=None)
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+
     def db_size_bytes(self) -> int:
         """Return the on-disk size of the SQLite file in bytes (0 if missing)."""
         try:

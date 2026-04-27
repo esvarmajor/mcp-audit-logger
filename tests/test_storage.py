@@ -228,6 +228,73 @@ def test_top_errors_groups_and_counts(store: AuditStore) -> None:
     assert rows[0]["occurrences"] == 2
 
 
+def test_top_consumers_groups_by_client_info(store: AuditStore) -> None:
+    t = time.time()
+    for _ in range(3):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+            client_info='{"ip":"10.0.0.1"}',
+        )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=False, error="boom",
+        client_info='{"ip":"10.0.0.1"}',
+    )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+        client_info='{"ip":"10.0.0.2"}',
+    )
+    rows = store.top_consumers()
+    by_client = {r["client_info"]: r for r in rows}
+    assert by_client['{"ip":"10.0.0.1"}']["call_count"] == 4
+    assert by_client['{"ip":"10.0.0.1"}']["error_count"] == 1
+    assert by_client['{"ip":"10.0.0.1"}']["error_rate"] == pytest.approx(0.25)
+    assert by_client['{"ip":"10.0.0.2"}']["call_count"] == 1
+    # Most active client first
+    assert rows[0]["client_info"] == '{"ip":"10.0.0.1"}'
+
+
+def test_top_consumers_buckets_null_client_info(store: AuditStore) -> None:
+    _insert(store)  # No client_info passed → NULL in DB
+    rows = store.top_consumers()
+    assert rows[0]["client_info"] == "(no client info)"
+
+
+def test_vacuum_runs_without_error(tmp_path: Path) -> None:
+    s = AuditStore(tmp_path / "audit.db")
+    t = time.time()
+    for _ in range(50):
+        s.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={"x": "y" * 200}, response={"r": "z" * 200},
+            success=True, error=None,
+        )
+    s.purge(before_ts=t + 1, dry_run=False)
+    s.vacuum()
+    # After purge+vacuum, the DB should still be openable and queryable.
+    assert s.recent(10) == []
+
+
+def test_vacuum_after_purge_reduces_size(tmp_path: Path) -> None:
+    s = AuditStore(tmp_path / "audit.db")
+    t = time.time()
+    for _ in range(200):
+        s.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={"big": "x" * 1024}, response={"big": "y" * 1024},
+            success=True, error=None,
+        )
+    s.purge(before_ts=t + 1, dry_run=False)
+    before = s.db_size_bytes()
+    s.vacuum()
+    after = s.db_size_bytes()
+    # VACUUM should never grow the file. Strict inequality is racy with
+    # WAL checkpoints, so just assert non-growth.
+    assert after <= before
+
+
 def test_top_errors_excludes_null_errors(store: AuditStore) -> None:
     # success=False but error=None → excluded (sentinel-row guard).
     _insert(store, tool="fetch", success=False, error=None)

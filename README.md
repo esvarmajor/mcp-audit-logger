@@ -32,7 +32,7 @@ independent of any individual server's logging. This project is that record.
   to know the logger is there.
 - **Full audit trail in SQLite.** One row per tool call. No external DB, no
   Kafka, nothing to operate.
-- **Ten query/management tools for agents.** An agent connected through the
+- **Twelve query/management tools for agents.** An agent connected through the
   logger can introspect and manage its own call history:
     - `audit_get_recent_calls` — newest N calls
     - `audit_get_calls_by_tool` — filter by tool name
@@ -40,9 +40,11 @@ independent of any individual server's logging. This project is that record.
     - `audit_get_call_stats` — per-tool aggregate metrics (count, avg/min/max/p50/p95, error rate)
     - `audit_get_slowest_calls` — N slowest calls overall, longest first
     - `audit_get_top_errors` — most frequent (tool, error) groupings
+    - `audit_get_top_consumers` — most active clients (by IP/UA)
     - `audit_get_calls_in_range` — time-bounded slice
     - `audit_search_arguments` — SQL LIKE search over argument JSON
     - `audit_export_jsonl` — export as JSONL for offline analysis
+    - `audit_vacuum` — run SQLite VACUUM to reclaim space after a purge
     - `audit_purge` — delete old rows (with dry-run protection)
 - **Streamable HTTP transport.** No SSE — deprecated as of the 2025-03-26 MCP
   spec revision.
@@ -188,6 +190,8 @@ offline analysis.
 | `audit_get_call_stats`      | `{}`                                                     | Per-tool aggregates (see below).         |
 | `audit_get_slowest_calls`   | `{ "limit": 20 }`                                        | Slowest-first array of call records.     |
 | `audit_get_top_errors`      | `{ "limit": 20 }`                                        | `(tool, error)` groups with occurrences. |
+| `audit_get_top_consumers`   | `{ "limit": 20 }`                                        | Per-client call/error counts and rate.   |
+| `audit_vacuum`              | `{}`                                                     | Size before/after + reclaimed bytes.     |
 | `audit_get_calls_in_range`  | `{ "start_ts": 1713600000, "end_ts": 1713700000 }`       | Calls in the given Unix-ts window.       |
 | `audit_search_arguments`    | `{ "pattern": "%example.com%", "limit": 50 }`            | Calls whose arguments match the pattern. |
 | `audit_export_jsonl`        | `{ "limit": 500, "since_id": 0 }`                        | JSONL text, one record per line.         |

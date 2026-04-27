@@ -304,6 +304,43 @@ async def test_audit_get_top_errors(server: Server, store: AuditStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_audit_get_top_consumers(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    for _ in range(2):
+        store.log_call(
+            ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+            arguments={}, response={}, success=True, error=None,
+            client_info='{"ip":"1.1.1.1"}',
+        )
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+        client_info='{"ip":"2.2.2.2"}',
+    )
+    result = await _call(server, "audit_get_top_consumers", {"limit": 10})
+    data = json.loads(result.content[0].text)
+    assert data[0]["client_info"] == '{"ip":"1.1.1.1"}'
+    assert data[0]["call_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_vacuum_returns_size_report(server: Server, store: AuditStore) -> None:
+    import time
+    t = time.time()
+    store.log_call(
+        ts_start=t, ts_end=t + 0.1, tool_name="fetch",
+        arguments={}, response={}, success=True, error=None,
+    )
+    result = await _call(server, "audit_vacuum", {})
+    out = json.loads(result.content[0].text)
+    assert "size_bytes_before" in out
+    assert "size_bytes_after" in out
+    assert "reclaimed_bytes" in out
+    assert out["reclaimed_bytes"] >= 0
+
+
+@pytest.mark.asyncio
 async def test_invalid_arguments_returns_error(server: Server) -> None:
     # limit must be ge=1; the SDK's jsonschema validation fires first
     result = await _call(server, "audit_get_recent_calls", {"limit": -5})

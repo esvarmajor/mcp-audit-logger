@@ -74,6 +74,10 @@ class _TopErrorsArgs(BaseModel):
     limit: int = Field(default=20, ge=1, le=1000)
 
 
+class _TopConsumersArgs(BaseModel):
+    limit: int = Field(default=20, ge=1, le=1000)
+
+
 class _PurgeArgs(BaseModel):
     before_ts: float = Field(
         description="Delete all rows whose ts_start is strictly before this Unix timestamp."
@@ -150,6 +154,24 @@ AUDIT_TOOLS: list[types.Tool] = [
             "frequent. Each row reports occurrences and last_seen (Unix ts)."
         ),
         inputSchema=_TopErrorsArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_get_top_consumers",
+        description=(
+            "Group calls by client_info (IP/UA snippet) and return the top N "
+            "callers with per-client call count, error count, error rate, and "
+            "last-seen timestamp. Useful for spotting noisy clients."
+        ),
+        inputSchema=_TopConsumersArgs.model_json_schema(),
+    ),
+    types.Tool(
+        name="audit_vacuum",
+        description=(
+            "Run SQLite VACUUM to reclaim disk space after a large purge. "
+            "Briefly blocks writers; reads continue. Returns the size before "
+            "and after as JSON."
+        ),
+        inputSchema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
     types.Tool(
         name="audit_purge",
@@ -252,6 +274,25 @@ def _run_audit_tool(
     elif name == "audit_get_top_errors":
         a_top = _TopErrorsArgs.model_validate(arguments)
         out = store.top_errors(limit=a_top.limit)
+    elif name == "audit_get_top_consumers":
+        a_tc = _TopConsumersArgs.model_validate(arguments)
+        out = store.top_consumers(limit=a_tc.limit)
+    elif name == "audit_vacuum":
+        before = store.db_size_bytes()
+        store.vacuum()
+        after = store.db_size_bytes()
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "size_bytes_before": before,
+                        "size_bytes_after": after,
+                        "reclaimed_bytes": max(0, before - after),
+                    }
+                ),
+            )
+        ]
     elif name == "audit_export_jsonl":
         a6 = _ExportArgs.model_validate(arguments)
         rows = store.export(limit=a6.limit, since_id=a6.since_id)
