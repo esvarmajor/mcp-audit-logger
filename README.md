@@ -339,6 +339,22 @@ python scripts/smoke.py        # exit 0 on success
 SMOKE_PORT=8800 ./scripts/smoke.sh  # alternate port via wrapper
 ```
 
+## Docker
+
+```bash
+docker build -t mcp-audit-logger .
+docker run --rm -p 8765:8765 \
+  -v "$PWD/audit:/data" \
+  -e AUDIT_DB_PATH=/data/audit.db \
+  -e AUDIT_DOWNSTREAM_COMMAND=python \
+  -e AUDIT_DOWNSTREAM_ARGS='["-m","mcp_server_fetch"]' \
+  mcp-audit-logger
+```
+
+The image runs as a non-root user, exposes port 8765, persists the audit
+DB to a `/data` volume, and registers a `HEALTHCHECK` that pings
+`/healthz` every 30 seconds.
+
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).

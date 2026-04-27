@@ -1,0 +1,35 @@
+# Keep the build context small.
+
+.git
+.github
+.claude
+.venv
+.venv*
+build
+dist
+*.egg-info
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+
+# Local artifacts
+audit.db
+audit.db-wal
+audit.db-shm
+smoke.db*
+
+# Editor / OS noise
+.idea
+.vscode
+.DS_Store
+
+# Tests/scripts/docs aren't needed inside the runtime image
+# (the build stage uses pyproject.toml + src/ + README.md only).
+tests
+scripts
+docs
+GAMEPLAN.md
+CHANGELOG.md
+Makefile
