@@ -24,11 +24,17 @@ import anyio
 import uvicorn
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.routing import Mount
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
+from . import __version__
 from .config import Config, load_config
+from .context import build_client_info_from_scope, client_info_var
 from .logging_config import configure_logging
+from .metrics import CONTENT_TYPE as METRICS_CONTENT_TYPE
+from .metrics import render as render_metrics
 from .obs.alerts import AlertManagerClient
 from .obs.prometheus import PrometheusClient
 from .obs.traces import JaegerClient, TempoClient, TraceBackend
@@ -71,6 +77,88 @@ def _auth_wrap(
     return _handler
 
 
+def _capture_client_info(
+    inner: Callable[[Scope, Receive, Send], Any],
+    *,
+    has_token: bool,
+) -> Callable[[Scope, Receive, Send], Any]:
+    """Wrap `inner` with a layer that sets `client_info_var` for the request.
+
+    The ContextVar is reset in a `finally` so the value never leaks into a
+    sibling task. Non-HTTP scopes (e.g. lifespan messages) are passed through
+    untouched.
+    """
+
+    async def _wrapped(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await inner(scope, receive, send)
+            return
+        info = build_client_info_from_scope(scope, has_token=has_token)
+        token = client_info_var.set(info)
+        try:
+            await inner(scope, receive, send)
+        finally:
+            client_info_var.reset(token)
+
+    return _wrapped
+
+
+def _build_health_payload(
+    store: AuditStore, proxy: DownstreamProxy | None
+) -> tuple[int, dict[str, Any]]:
+    """Compute the /healthz status code and JSON body."""
+    db_ok = True
+    try:
+        store.db_size_bytes()
+    except Exception:
+        db_ok = False
+
+    # not_configured → None; configured → True/False based on session presence.
+    downstream_ok: bool | None = (
+        None if proxy is None else proxy._session is not None
+    )
+
+    ready = db_ok and (downstream_ok is not False)
+    body = {
+        "status": "ok" if ready else "degraded",
+        "db_writable": db_ok,
+        "downstream": (
+            "connected"
+            if downstream_ok is True
+            else "disconnected"
+            if downstream_ok is False
+            else "not_configured"
+        ),
+        "version": __version__,
+    }
+    return (200 if ready else 503), body
+
+
+def _make_health_endpoint(
+    store: AuditStore, proxy: DownstreamProxy | None
+) -> Callable[[Request], Any]:
+    """Starlette endpoint for /healthz — never gated by auth."""
+
+    async def _endpoint(_request: Request) -> Response:
+        status, body = _build_health_payload(store, proxy)
+        return JSONResponse(body, status_code=status)
+
+    return _endpoint
+
+
+def _make_metrics_endpoint(
+    store: AuditStore, *, expected_token: str | None
+) -> Callable[[Request], Any]:
+    """Starlette endpoint for /metrics. Gated by bearer if expected_token is set."""
+
+    async def _endpoint(request: Request) -> Response:
+        if expected_token is not None and request.headers.get("authorization") != expected_token:
+            return PlainTextResponse("Unauthorized", status_code=401)
+        return Response(render_metrics(store), media_type=METRICS_CONTENT_TYPE)
+
+    return _endpoint
+
+
 # ---------------------------------------------------------------------- CLI
 
 
@@ -82,12 +170,22 @@ def _parse_args() -> argparse.Namespace:
             "to a local SQLite database."
         ),
     )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"mcp-audit-logger {__version__}",
+    )
     p.add_argument("--config", help="Path to JSON config file (overrides env).")
     p.add_argument("--host", help="Host to bind (default 127.0.0.1).")
     p.add_argument("--port", type=int, help="Port to bind (default 8765).")
     p.add_argument("--db-path", help="SQLite DB file (default ./audit.db).")
     p.add_argument("--mount-path", help="URL path for the MCP endpoint (default /mcp).")
     p.add_argument("--log-level", help="Log level: DEBUG, INFO, WARNING, ERROR (default INFO).")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Validate config and exit (no server start). Exits 0 if config loads cleanly.",
+    )
     return p.parse_args()
 
 
@@ -171,7 +269,12 @@ async def _run(cfg: Config) -> None:
     if expected_token:
         log.info("auth.bearer_token_enabled")
 
-    handle_mcp = _auth_wrap(expected_token, session_mgr.handle_request)
+    handle_mcp = _auth_wrap(
+        expected_token,
+        _capture_client_info(
+            session_mgr.handle_request, has_token=expected_token is not None
+        ),
+    )
 
     async def _retention_loop(store: AuditStore, retention_days: int) -> None:
         """Delete rows older than `retention_days` once per hour, forever."""
@@ -221,10 +324,27 @@ async def _run(cfg: Config) -> None:
                     await proxy.stop()
                 log.info("server.stopped")
 
-    app = Starlette(
-        routes=[Mount(cfg.mount_path, app=handle_mcp)],
-        lifespan=lifespan,
-    )
+    # Use Starlette Route (not Mount) for /healthz and /metrics so bare
+    # paths don't 307-redirect to a trailing-slash variant.
+    routes: list[Any] = [
+        Mount(cfg.mount_path, app=handle_mcp),
+        Route(
+            cfg.health_path,
+            _make_health_endpoint(store, proxy),
+            methods=["GET", "HEAD"],
+        ),
+    ]
+    if cfg.enable_metrics:
+        routes.append(
+            Route(
+                cfg.metrics_path,
+                _make_metrics_endpoint(store, expected_token=expected_token),
+                methods=["GET", "HEAD"],
+            )
+        )
+        log.info("metrics.enabled", extra={"path": cfg.metrics_path})
+
+    app = Starlette(routes=routes, lifespan=lifespan)
 
     uvicorn_cfg = uvicorn.Config(
         app,
@@ -242,6 +362,16 @@ def main() -> None:
     cfg = load_config(args.config)
     cfg = _apply_cli_overrides(cfg, args)
     configure_logging(cfg.log_level)
+    if args.check:
+        # Validation-only mode for CI / pre-deploy checks.
+        downstream_label = (
+            cfg.downstream.kind if cfg.downstream is not None else "(none)"
+        )
+        print(
+            f"config OK — host={cfg.host} port={cfg.port} db={cfg.db_path} "
+            f"downstream={downstream_label}"
+        )
+        return
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_run(cfg))
 

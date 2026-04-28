@@ -13,6 +13,8 @@ Design notes
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import sqlite3
 import threading
@@ -20,6 +22,23 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+
+def _percentile_sorted(sorted_values: list[float], pct: float) -> float | None:
+    """Linear-interpolated percentile of a pre-sorted, non-empty sequence.
+
+    Returns None for an empty input. `pct` is a number in [0, 100].
+    """
+    if not sorted_values:
+        return None
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    rank = (pct / 100.0) * (len(sorted_values) - 1)
+    lo = int(rank)
+    hi = min(lo + 1, len(sorted_values) - 1)
+    frac = rank - lo
+    return float(sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit_calls (
@@ -147,12 +166,41 @@ class AuditStore:
             )
             return int(cur.lastrowid or 0)
 
+    def get_by_id(self, call_id: int) -> dict[str, Any] | None:
+        """Return a single audit row by primary key, or None if missing."""
+        with self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM audit_calls WHERE id = ?",
+                (call_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row is not None else None
+
     def recent(self, limit: int = 50) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 1000))
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM audit_calls ORDER BY id DESC LIMIT ?",
                 (limit,),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def by_client(
+        self, *, client_pattern: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Return calls whose client_info JSON matches a SQL LIKE pattern.
+
+        Companion to ``top_consumers``: once you've identified a noisy
+        client, this drills into its actual call history. Use ``%`` as
+        the wildcard — e.g. ``%10.0.0.5%`` to match all calls from a
+        specific IP regardless of UA, or ``%claude-desktop%`` to match
+        all calls from any Claude Desktop client.
+        """
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE client_info LIKE ? "
+                "ORDER BY id DESC LIMIT ?",
+                (client_pattern, limit),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
@@ -175,9 +223,14 @@ class AuditStore:
         return [self._row_to_dict(r) for r in rows]
 
     def stats(self) -> list[dict[str, Any]]:
-        """Per-tool aggregate stats, ordered by call count desc."""
+        """Per-tool aggregate stats, ordered by call count desc.
+
+        Returns count, error count/rate, and a duration distribution
+        (avg, min, max, p50, p95). Percentiles are computed in Python
+        because SQLite has no native percentile_cont().
+        """
         with self._conn() as c:
-            rows = c.execute(
+            agg_rows = c.execute(
                 """
                 SELECT tool_name,
                        COUNT(*)                                           AS call_count,
@@ -192,6 +245,54 @@ class AuditStore:
                 ORDER BY call_count DESC
                 """
             ).fetchall()
+            durations: dict[str, list[float]] = {}
+            if agg_rows:
+                for tool, dur in c.execute(
+                    "SELECT tool_name, duration_ms FROM audit_calls"
+                ).fetchall():
+                    durations.setdefault(tool, []).append(dur)
+
+        out: list[dict[str, Any]] = []
+        for r in agg_rows:
+            d = dict(r)
+            ds = sorted(durations.get(d["tool_name"], []))
+            d["p50_duration_ms"] = _percentile_sorted(ds, 50)
+            d["p95_duration_ms"] = _percentile_sorted(ds, 95)
+            out.append(d)
+        return out
+
+    def slowest(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the slowest N calls overall, longest duration first."""
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls ORDER BY duration_ms DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def top_errors(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Group failed calls by (tool_name, error) and return the most frequent.
+
+        Each entry includes occurrences, last_seen (Unix ts), and a sample
+        argument JSON from the most recent occurrence.
+        """
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT tool_name,
+                       error,
+                       COUNT(*)                AS occurrences,
+                       MAX(ts_start)           AS last_seen
+                FROM audit_calls
+                WHERE success = 0 AND error IS NOT NULL
+                GROUP BY tool_name, error
+                ORDER BY occurrences DESC, last_seen DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return [dict(r) for r in rows]
 
     def in_range(self, *, start_ts: float, end_ts: float, limit: int = 200) -> list[dict[str, Any]]:
@@ -205,14 +306,38 @@ class AuditStore:
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def search_arguments(self, *, pattern: str, limit: int = 50) -> list[dict[str, Any]]:
-        """SQL LIKE search over the serialised arguments JSON column."""
+    def search_arguments(
+        self,
+        *,
+        pattern: str,
+        tool_name: str | None = None,
+        include_response: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """SQL LIKE search over the serialised JSON columns.
+
+        ``include_response=True`` widens the search to also match against the
+        response payload (useful when you remember a substring of what came
+        back rather than what went in). ``tool_name`` is an optional equality
+        filter on the call's tool name.
+        """
         limit = max(1, min(limit, 1000))
+        match_clauses = ["arguments_json LIKE ?"]
+        params: list[Any] = [pattern]
+        if include_response:
+            match_clauses = ["(arguments_json LIKE ? OR response_json LIKE ?)"]
+            params = [pattern, pattern]
+        if tool_name:
+            match_clauses.append("tool_name = ?")
+            params.append(tool_name)
+        sql = (
+            "SELECT * FROM audit_calls "
+            f"WHERE {' AND '.join(match_clauses)} "
+            "ORDER BY id DESC LIMIT ?"
+        )
+        params.append(limit)
         with self._conn() as c:
-            rows = c.execute(
-                "SELECT * FROM audit_calls WHERE arguments_json LIKE ? ORDER BY id DESC LIMIT ?",
-                (pattern, limit),
-            ).fetchall()
+            rows = c.execute(sql, tuple(params)).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     def export(self, *, limit: int = 500, since_id: int = 0) -> list[dict[str, Any]]:
@@ -224,6 +349,144 @@ class AuditStore:
                 (since_id, limit),
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def top_consumers(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Group calls by client_info and return the top N callers.
+
+        Useful when multiple agents/clients share one proxy — surfaces who
+        is generating the most traffic, with a per-client error rate.
+        Rows with NULL client_info (e.g. older entries) are bucketed under
+        a synthetic ``"(no client info)"`` key.
+        """
+        limit = max(1, min(limit, 1000))
+        with self._conn() as c:
+            rows = c.execute(
+                """
+                SELECT
+                    COALESCE(client_info, '(no client info)') AS client_info,
+                    COUNT(*)                                   AS call_count,
+                    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS error_count,
+                    CAST(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS REAL)
+                        / COUNT(*)                             AS error_rate,
+                    MAX(ts_start)                              AS last_seen
+                FROM audit_calls
+                GROUP BY client_info
+                ORDER BY call_count DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def vacuum(self) -> None:
+        """Run SQLite VACUUM to reclaim disk space after a large purge.
+
+        Cannot run inside a transaction. We open a fresh connection without
+        the WAL-shared write lock so concurrent reads still work; VACUUM
+        itself blocks writes for its duration, which is unavoidable.
+        """
+        with self._lock:
+            conn = sqlite3.connect(str(self._db_path), timeout=60.0, isolation_level=None)
+            try:
+                conn.execute("VACUUM")
+            finally:
+                conn.close()
+
+    _CSV_FIELDS = (
+        "id",
+        "ts_start",
+        "ts_end",
+        "duration_ms",
+        "tool_name",
+        "success",
+        "error",
+        "arguments",
+        "response",
+        "client_info",
+        "downstream_target",
+    )
+
+    def export_csv(self, *, limit: int = 500, since_id: int = 0) -> str:
+        """Return rows as CSV text with a header row.
+
+        JSON columns (arguments, response) are re-serialized as single
+        CSV cells. Empty cells are used for SQL NULL values. Field order
+        matches `_CSV_FIELDS` and is intentionally stable so downstream
+        consumers can rely on it.
+        """
+        rows = self.export(limit=limit, since_id=since_id)
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(self._CSV_FIELDS))
+        writer.writeheader()
+        for r in rows:
+            row = {k: r.get(k) for k in self._CSV_FIELDS}
+            for json_col in ("arguments", "response"):
+                v = row[json_col]
+                row[json_col] = "" if v is None else json.dumps(v, default=str)
+            row["error"] = "" if row["error"] is None else row["error"]
+            row["client_info"] = "" if row["client_info"] is None else row["client_info"]
+            row["downstream_target"] = (
+                "" if row["downstream_target"] is None else row["downstream_target"]
+            )
+            writer.writerow(row)
+        return buf.getvalue()
+
+    def count(
+        self,
+        *,
+        tool_name: str | None = None,
+        success: bool | None = None,
+        since_ts: float | None = None,
+    ) -> int:
+        """Return COUNT(*) over audit_calls with optional filters.
+
+        Lightweight cousin to ``stats()`` — when you only need the
+        number, not the per-tool breakdown. Filters AND together; pass
+        ``None`` to leave a dimension unconstrained.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if tool_name is not None:
+            clauses.append("tool_name = ?")
+            params.append(tool_name)
+        if success is not None:
+            clauses.append("success = ?")
+            params.append(1 if success else 0)
+        if since_ts is not None:
+            clauses.append("ts_start >= ?")
+            params.append(since_ts)
+        sql = "SELECT COUNT(*) FROM audit_calls"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        with self._conn() as c:
+            return int(c.execute(sql, tuple(params)).fetchone()[0])
+
+    def recent_failures(
+        self, *, window_seconds: float, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return failed calls whose ts_start is within the last ``window_seconds``.
+
+        Pairs nicely with operational dashboards: "show me everything
+        that broke in the last 5 minutes" is one call.
+        """
+        import time as _time
+
+        limit = max(1, min(limit, 1000))
+        cutoff = _time.time() - window_seconds
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM audit_calls WHERE success = 0 AND ts_start >= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def db_size_bytes(self) -> int:
+        """Return the on-disk size of the SQLite file in bytes (0 if missing)."""
+        try:
+            return self._db_path.stat().st_size
+        except FileNotFoundError:
+            return 0
 
     def purge(self, *, before_ts: float, dry_run: bool = True) -> int:
         """Delete rows with ts_start < before_ts. Returns the number of rows affected."""
