@@ -55,6 +55,10 @@ independent of any individual server's logging. This project is that record.
     - `audit_export_csv` — export as CSV for spreadsheet workflows
     - `audit_vacuum` — run SQLite VACUUM to reclaim space after a purge
     - `audit_purge` — delete old rows (with dry-run protection)
+- **Seven observability tools** for metrics, traces, and incident triage —
+  see [Observability extensions](#observability-extensions). The composite
+  `obs_investigate` tool is the headline: one MCP call, four backends fanned
+  out concurrently, structured result with a deterministic English summary.
 - **Streamable HTTP transport.** No SSE — deprecated as of the 2025-03-26 MCP
   spec revision.
 - **Structured JSON logs on stderr.** One JSON object per line, ready for any
@@ -200,6 +204,37 @@ If no downstream is configured, the logger still runs — it just exposes the
 `audit_*` query tools against whatever is already in `audit.db`. Useful for
 offline analysis.
 
+### Observability backends
+
+These power the `obs_*` tools. All optional with localhost defaults — to
+explicitly disable a backend, set its env var to an empty string.
+
+| Key                  | Env var (preferred)         | Env var (fallback)  | Default                  |
+| -------------------- | --------------------------- | ------------------- | ------------------------ |
+| `prometheus_url`     | `AUDIT_PROMETHEUS_URL`      | `PROMETHEUS_URL`    | `http://localhost:9090`  |
+| `tempo_url`          | `AUDIT_TEMPO_URL`           | `TEMPO_URL`         | `http://localhost:3200`  |
+| `jaeger_url`         | `AUDIT_JAEGER_URL`          | `JAEGER_URL`        | `http://localhost:16686` |
+| `alertmanager_url`   | `AUDIT_ALERTMANAGER_URL`    | `ALERTMANAGER_URL`  | `http://localhost:9093`  |
+| `metric_names`       | `AUDIT_METRIC_NAMES` (JSON) | —                   | OTLP semconv (see below) |
+
+If both `tempo_url` and `jaeger_url` are configured, Tempo wins. If neither
+is set, trace tools return `{ "error": "not_configured", "backend": "trace", ... }`.
+
+Default metric names follow OpenTelemetry HTTP semantic conventions. Override
+any subset via `metric_names` in the config file or `AUDIT_METRIC_NAMES` as
+JSON:
+
+```json
+{
+  "metric_names": {
+    "request_count": "http_requests_total",
+    "request_duration": "http_request_duration_seconds",
+    "service_label": "service",
+    "status_label": "status"
+  }
+}
+```
+
 ## The audit_* tools
 
 | Tool                        | Input                                                    | Output                                   |
@@ -253,6 +288,68 @@ A call record looks like:
   }
 ]
 ```
+
+## Observability extensions
+
+Alongside the `audit_*` tools, the proxy exposes seven `obs_*` tools that
+turn it into a single point of contact for incident investigation. Metrics
+go to Prometheus, traces go to Tempo or Jaeger, alerts go to AlertManager,
+and a composite `obs_investigate` tool fans out across all four (plus the
+local audit log) concurrently.
+
+| Tool                              | Input                                                          | Returns                                       |
+| --------------------------------- | -------------------------------------------------------------- | --------------------------------------------- |
+| `obs_query_metric`                | `{ expr, start, end, step }`                                   | Raw PromQL range query result.                |
+| `obs_get_service_metrics`         | `{ service, window }`                                          | RED metrics: error rate, RPS, p50/p95/p99.    |
+| `obs_list_instrumented_services`  | `{ base_metric? }`                                             | Discovery via Prometheus label values.        |
+| `obs_get_trace`                   | `{ trace_id }`                                                 | Recursive span tree (parent-child).           |
+| `obs_find_traces`                 | `{ service, start, end, min_duration_ms?, error_only?, limit?}`| Trace metadata for triage.                    |
+| `obs_get_slow_spans`              | `{ service, window, threshold_ms }`                            | Spans grouped by operation with p99 + samples.|
+| `obs_investigate`                 | `{ service, start, end }`                                      | Metrics delta + traces + logs + alerts + summary. |
+
+Times are ISO8601 (`2024-01-01T14:00:00Z`). Windows are Prometheus duration
+syntax (`5m`, `1h`, `30s`).
+
+### Error envelope
+
+All `obs_*` tools return a top-level JSON object. Errors look like:
+
+```json
+{ "error": "not_configured", "backend": "tempo", "message": "Set TEMPO_URL to enable trace queries" }
+{ "error": "backend_unreachable", "backend": "prometheus", "message": "ConnectError: ..." }
+{ "error": "upstream_error", "backend": "jaeger", "status": 500, "message": "..." }
+{ "error": "trace_not_found", "trace_id": "...", "backend": "tempo" }
+```
+
+When a tool returns one of these, `CallToolResult.isError` is `true`. Network
+errors never propagate as exceptions across the MCP boundary.
+
+### `obs_investigate` shape
+
+```json
+{
+  "service": "checkout",
+  "window": { "start": "2024-04-27T14:30:00Z", "end": "2024-04-27T14:45:00Z" },
+  "prior_window": { "start": "2024-04-27T14:15:00Z", "end": "2024-04-27T14:30:00Z" },
+  "metrics_delta": {
+    "error_rate":     { "current": 0.12, "prior": 0.03, "delta_pct": 300.0 },
+    "request_rate_rps": { "current": 45,  "prior": 45,  "delta_pct": 0 },
+    "latency_p99_ms":  { "current": 2400, "prior": 800, "delta_pct": 200.0 }
+  },
+  "anomalous_traces": {
+    "errored": [ { "trace_id": "...", "root_name": "POST /api/checkout", "duration_ms": 1200, "error": true } ],
+    "slowest": [ /* top 3 by duration */ ]
+  },
+  "log_sample": [ /* up to 20 recent audit rows */ ],
+  "alerts":     { "active": [...], "recently_resolved": [...] },
+  "summary":    "Error rate spiked 4.0x vs prior window. 87% of errored traces share operation: POST /api/checkout. Active alerts: HighErrorRate.",
+  "errors":     []
+}
+```
+
+If a backend is unreachable, the corresponding key is `null` and `errors[]`
+gets `{ step, backend, message }`. The summary is still generated from
+whatever data did arrive.
 
 ## SQLite schema
 

@@ -84,6 +84,19 @@ class Config:
     # k8s liveness/readiness probes.
     health_path: str = "/healthz"
 
+    # Observability backends queried by the obs_* tools. URLs default to
+    # standard local ports; set the env var to an empty string to explicitly
+    # disable a backend (the client will not be instantiated and tools
+    # requiring it return a structured `not_configured` error).
+    prometheus_url: str | None = "http://localhost:9090"
+    tempo_url: str | None = "http://localhost:3200"
+    jaeger_url: str | None = "http://localhost:16686"
+    alertmanager_url: str | None = "http://localhost:9093"
+
+    # Optional override of metric names used by obs_get_service_metrics.
+    # Empty dict means "use OTLP semantic-convention defaults".
+    metric_names: dict[str, str] = field(default_factory=dict)
+
 
 @overload
 def _env(name: str, default: str) -> str: ...
@@ -92,6 +105,19 @@ def _env(name: str, default: None = ...) -> str | None: ...
 def _env(name: str, default: str | None = None) -> str | None:
     val = os.environ.get(name)
     return val if val not in (None, "") else default
+
+
+def _env_present(*names: str) -> tuple[bool, str | None]:
+    """Return (was_set, value) for the first env var present in the environment.
+
+    Differs from `_env` in that an explicitly-set empty string returns
+    (True, "") so callers can treat it as "explicit disable" rather than
+    falling back to a default. Returns (False, None) if no name is set.
+    """
+    for n in names:
+        if n in os.environ:
+            return True, os.environ[n]
+    return False, None
 
 
 def load_config(config_path: str | Path | None = None) -> Config:
@@ -161,6 +187,30 @@ def load_config(config_path: str | Path | None = None) -> Config:
     downstream_data = cfg_data.get("downstream") or _load_downstream_from_env()
     if downstream_data:
         cfg.downstream = _parse_downstream(downstream_data)
+
+    # Observability URLs. AUDIT_-prefixed name takes precedence over the
+    # bare name (per spec). Setting either to empty string disables.
+    for attr, audit_name, bare_name in (
+        ("prometheus_url", "AUDIT_PROMETHEUS_URL", "PROMETHEUS_URL"),
+        ("tempo_url", "AUDIT_TEMPO_URL", "TEMPO_URL"),
+        ("jaeger_url", "AUDIT_JAEGER_URL", "JAEGER_URL"),
+        ("alertmanager_url", "AUDIT_ALERTMANAGER_URL", "ALERTMANAGER_URL"),
+    ):
+        if attr in cfg_data:
+            setattr(cfg, attr, str(cfg_data[attr]))
+        was_set, value = _env_present(audit_name, bare_name)
+        if was_set:
+            setattr(cfg, attr, value)
+
+    if "metric_names" in cfg_data and isinstance(cfg_data["metric_names"], dict):
+        cfg.metric_names = {str(k): str(v) for k, v in cfg_data["metric_names"].items()}
+    if (v := _env("AUDIT_METRIC_NAMES")):
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, dict):
+                cfg.metric_names = {str(k): str(v) for k, v in parsed.items()}
+        except (json.JSONDecodeError, TypeError):
+            pass
 
     return cfg
 
