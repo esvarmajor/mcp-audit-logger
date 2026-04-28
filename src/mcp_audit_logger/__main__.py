@@ -29,6 +29,9 @@ from starlette.types import Receive, Scope, Send
 
 from .config import Config, load_config
 from .logging_config import configure_logging
+from .obs.alerts import AlertManagerClient
+from .obs.prometheus import PrometheusClient
+from .obs.traces import JaegerClient, TempoClient, TraceBackend
 from .proxy import DownstreamProxy
 from .server import build_server
 from .storage import AuditStore
@@ -122,7 +125,38 @@ async def _run(cfg: Config) -> None:
     proxy: DownstreamProxy | None = (
         DownstreamProxy(cfg.downstream) if cfg.downstream is not None else None
     )
-    srv = build_server(proxy=proxy, store=store)
+
+    prom_client: PrometheusClient | None = (
+        PrometheusClient(cfg.prometheus_url) if cfg.prometheus_url else None
+    )
+    trace_backend: TraceBackend | None
+    if cfg.tempo_url:
+        trace_backend = TempoClient(cfg.tempo_url)
+    elif cfg.jaeger_url:
+        trace_backend = JaegerClient(cfg.jaeger_url)
+    else:
+        trace_backend = None
+    alerts_client: AlertManagerClient | None = (
+        AlertManagerClient(cfg.alertmanager_url) if cfg.alertmanager_url else None
+    )
+
+    log.info(
+        "obs.backends",
+        extra={
+            "prometheus": bool(cfg.prometheus_url),
+            "trace": getattr(trace_backend, "backend_name", None),
+            "alertmanager": bool(cfg.alertmanager_url),
+        },
+    )
+
+    srv = build_server(
+        proxy=proxy,
+        store=store,
+        prometheus_client=prom_client,
+        trace_backend=trace_backend,
+        alerts_client=alerts_client,
+        metric_names=cfg.metric_names,
+    )
 
     session_mgr = StreamableHTTPSessionManager(
         app=srv,

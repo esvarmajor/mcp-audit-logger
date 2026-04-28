@@ -24,6 +24,10 @@ import mcp.types as types
 from mcp.server.lowlevel import Server
 from pydantic import BaseModel, Field, ValidationError
 
+from .obs import OBS_TOOL_NAMES, OBS_TOOLS, run_obs_tool
+from .obs.alerts import AlertManagerClient
+from .obs.prometheus import PrometheusClient
+from .obs.traces import TraceBackend
 from .proxy import DownstreamProxy
 from .storage import AuditStore
 
@@ -147,18 +151,26 @@ def build_server(
     proxy: DownstreamProxy | None,
     store: AuditStore,
     server_name: str = "mcp-audit-logger",
+    prometheus_client: PrometheusClient | None = None,
+    trace_backend: TraceBackend | None = None,
+    alerts_client: AlertManagerClient | None = None,
+    metric_names: dict[str, str] | None = None,
 ) -> Server:
     """Return a configured low-level Server instance.
 
     Handlers are registered using the SDK's decorator API (mcp 1.27+):
       @srv.list_tools()  →  func() -> list[Tool]
       @srv.call_tool()   →  func(name, arguments) -> CallToolResult | list[ContentBlock]
+
+    Observability tools (obs_*) are always registered. Backends not configured
+    return structured `not_configured` errors at call time.
     """
     srv: Server = Server(server_name)
+    obs_metric_names = metric_names or {}
 
     @srv.list_tools()
     async def _list_tools() -> list[types.Tool]:
-        tools: list[types.Tool] = list(AUDIT_TOOLS)
+        tools: list[types.Tool] = list(AUDIT_TOOLS) + list(OBS_TOOLS)
         if proxy is not None:
             try:
                 downstream = await proxy.list_tools()
@@ -179,6 +191,18 @@ def build_server(
                     isError=True,
                 )
 
+        if name in OBS_TOOL_NAMES:
+            content, is_err = await run_obs_tool(
+                name,
+                arguments,
+                prometheus_client=prometheus_client,
+                trace_backend=trace_backend,
+                alerts_client=alerts_client,
+                store=store,
+                metric_names=obs_metric_names,
+            )
+            return types.CallToolResult(content=content, isError=is_err)
+
         if proxy is None:
             return types.CallToolResult(
                 content=[
@@ -186,7 +210,7 @@ def build_server(
                         type="text",
                         text=(
                             f"Unknown tool {name!r}. No downstream server is configured — "
-                            "only audit_* tools are available."
+                            "only audit_* and obs_* tools are available."
                         ),
                     )
                 ],
